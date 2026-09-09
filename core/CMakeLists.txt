@@ -21,6 +21,7 @@ find_library(QUICHE_LIBRARY NAMES quiche)
 # llm.cpp 只放派发与共有部分；内置工具在 tools（ADR-0016：从前是 5 个动态库容器）——
 add_library(realagent_core_lib STATIC
   src/config.cpp
+  src/plugin.cpp
   src/llm/llm.cpp
   src/llm/upstream/anthropic_messages.cpp
   src/llm/upstream/openai_chat.cpp
@@ -42,6 +43,10 @@ add_library(realagent_core_lib STATIC
   src/agent/command.cpp
   src/agent/session.cpp
   src/agent/skills.cpp
+  src/agent/commands.cpp
+  src/agent/hooks.cpp
+  src/agent/agent_defs.cpp
+  src/agent/frontmatter.cpp
   src/mcp/client.cpp
   src/mcp/hub.cpp
 )

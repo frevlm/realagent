@@ -9,9 +9,10 @@
 namespace realagent {
 
 Executor::Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
-                   Agents *pool, int agent_id, const McpHub::Lease *mcp)
+                   Agents *pool, int agent_id, const McpHub::Lease *mcp,
+                   const Hooks *hooks)
     : ctx_(ctx), approval_(approval), workdir_(std::move(workdir)), pool_(pool),
-      agent_id_(agent_id), mcp_(mcp)
+      agent_id_(agent_id), mcp_(mcp), hooks_(hooks)
 {
 }
 
@@ -26,7 +27,8 @@ nlohmann::json Executor::mcp_call(const nlohmann::json &tool, const nlohmann::js
 {
     const std::string server = tool_server(tool);
     for (const auto &c : mcp_->conns)
-        if (c->name() == server) return c->call(tool["_core"]["remote_name"], params, &interrupted_);
+        if (c.name == server)
+            return c.client->call(tool["_core"]["remote_name"], params, &interrupted_);
     /* core 是常驻服务，一个空指针会带走所有 agent，所以这里不解引用一个找不到的连接。
      * 清单与连接是 hub 同一个循环里生成的，正常路径到不了这儿。 */
     return tool_fail("MCP server 不在手上: " + server);
@@ -111,6 +113,15 @@ nlohmann::json Executor::execute(const std::string &call_id, const std::string &
     std::string reason;
     if (!check_permission(*tool, params_json, &reason)) return bail(tool_fail(reason), false);
 
+    /* preHook：**只能收紧，不能放宽**（ADR-0024 §6）。它排在 permission 之后——
+     * 一个 hook 永远不能把 ask 变成 allow，因为它根本走不到还没裁决的那一步。 */
+    if (hooks_ && !hooks_->empty())
+    {
+        nlohmann::json p{{"matcher_key", name}, {"agent_id", agent_id_}, {"cwd", workdir_}, {"tool_name", name}, {"tool_input", params_json}};
+        if (const HookOutcome h = hooks_->run(HookEvent::PreToolUse, p, &interrupted_); h.deny)
+            return bail(tool_fail(h.reason.empty() ? "被 hook 拦下" : h.reason), false);
+    }
+
     // 登记在先、执行在后：这个顺序才让 interrupt() 要么打断得到它、要么撞上 interrupted_，
     // 不存在"检查完了才开始跑"的缝
     {
@@ -135,6 +146,20 @@ nlohmann::json Executor::execute(const std::string &call_id, const std::string &
         // "算不算被中断"由 core 判——中止是 core 提的，工具不必编造状态码
         r["interrupted"] = interrupted_.load();
         inflight_ = false;
+    }
+
+    /* postHook。**判据是「有没有产出一个结果」**：工具报错算做完了，post 要跑并拿得到
+     * 那个结果；被中断的那件事没做完，post 不跑（ADR-0024 §6）。不用 RAII——
+     * 它在这两种情况下的行为恰好是反的。 */
+    if (hooks_ && !hooks_->empty() && !r.value("interrupted", false))
+    {
+        nlohmann::json p{{"matcher_key", name},
+                         {"agent_id", agent_id_},
+                         {"cwd", workdir_},
+                         {"tool_name", name},
+                         {"tool_input", params_json},
+                         {"tool_response", r.value("content", nlohmann::json::array())}};
+        hooks_->run(HookEvent::PostToolUse, p, &interrupted_);
     }
     return r;
 }
@@ -173,10 +198,28 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
         return tool_ok("sent to " + std::to_string(to));
     }
 
-    // spawn：派生方决定新 agent 的全部出入边（ADR-0019）
+    /* spawn：派生方决定新 agent 的全部出入边（ADR-0019），也由它解析 `agent`（ADR-0024 §8）——
+     * 它在自己的 system prompt 里看见了哪些名字，就该拿到哪一份正文。让被派生方按自己的
+     * workdir 再查一次，会出现「模型看见的名字在那边不存在」。 */
+    std::string persona;
+    if (const std::string want = str("agent"); !want.empty())
+    {
+        const Agent *me = pool_->find(agent_id_);
+        bool known = false;
+        if (me)
+            for (const AgentDef &d : me->agent_defs())
+                if (d.name == want)
+                {
+                    persona = d.body;
+                    known = true;
+                }
+        // 认不出就当场说，不悄悄派生一个没有角色的 agent
+        if (!known) return tool_fail("unknown agent definition: " + want);
+    }
+
     std::string err;
     const int id = pool_->create(str("workdir"), agent_id_, id_list(params, "in_edges"),
-                                 id_list(params, "out_edges"), err);
+                                 id_list(params, "out_edges"), err, persona);
     if (id <= 0) return tool_fail(err);
     pool_->post(id, str("prompt"));
     return tool_ok(std::to_string(id));

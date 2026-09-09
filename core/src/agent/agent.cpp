@@ -21,21 +21,27 @@ std::string session_dir_of(const std::string &workdir, bool sub)
 } // namespace
 
 Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
-             Agents *pool, bool sub)
+             Agents *pool, bool sub, std::string persona)
     : ctx_(ctx), pool_(pool), id_(id), workdir_(std::move(workdir)),
-      mcp_(ctx.mcp ? ctx.mcp->open(workdir_) : McpHub::Lease{}),
-      exe_(ctx, approval, workdir_, pool_, id_, &mcp_),
+      mcp_(ctx.mcp ? ctx.mcp->open(workdir_, ctx.config->get_json("mcp_http_bridge"))
+                   : McpHub::Lease{}),
+      hooks_(Hooks::scan(workdir_)), exe_(ctx, approval, workdir_, pool_, id_, &mcp_, &hooks_),
       session_dir_(session_dir_of(workdir_, sub)),
-      session_(session_dir_), skills_(scan_skills(workdir_))
+      session_(session_dir_), skills_(scan_skills(workdir_)), commands_(scan_commands(workdir_)),
+      agent_defs_(scan_agent_defs(workdir_)), persona_(std::move(persona))
 {
     /* 连不上的 server 只报不拦（models.json 那条先例）。用户当下看不见这行——
      * core 是常驻服务，面前只有 TUI。这笔债 skill 也欠着，一并另算（ADR-0023 §8）。 */
     for (const std::string &e : mcp_.errors) fprintf(stderr, "[mcp] %s\n", e.c_str());
+    for (const std::string &e : hooks_.errors()) fprintf(stderr, "[hook] %s\n", e.c_str());
     if (!mcp_.tools.empty())
         fprintf(stderr, "[mcp] agent %d: %zu servers, %zu tools\n", id_, mcp_.conns.size(),
                 mcp_.tools.size());
 
     messages_ = nlohmann::json::array();
+    /* SessionStart：建 agent 就是一次「会话换了一份」。**这会阻塞建 agent**——
+     * 每个匹配的 hook 一个进程，各自最多 timeout 那么久。装即授权，也就装即承担。 */
+    session_start_hook("startup");
     loop_ = std::thread([this] { loop(); });
 }
 
@@ -310,7 +316,13 @@ nlohmann::json Agent::build_dialog(ModelTier tier) const
                                                     "User: Explain this function.\n"
                                                     "Assistant: [Explains the function] + tool_call: stop()" +
         // skill 清单（ADR-0022）。一个都没有时这里是空串——system prompt 与加这个功能之前一个字不差
-        skills_prompt(skills_);
+        skills_prompt(skills_) +
+        // 可以拿去 spawn 的 agent 定义（ADR-0024 §8）。同上，一个都没有就是空串
+        agent_defs_prompt(agent_defs_) +
+        // 派生方交下来的角色正文。**接在最后**：core 那段与 stop 契约永远在它前面
+        (persona_.empty() ? std::string() : "\n\n" + persona_) +
+        // SessionStart hook 注入的那段（ADR-0024 §6）。同上，没有就是空串
+        (session_context_.empty() ? std::string() : "\n\n" + session_context_);
     /* 工具定义**就是端点要的那个对象**：拷一份，抹掉 core 私有的那一个键（ADR-0023 §2）。
      * LLM 见到的名字与 executor 查表用的名字是同一个。 */
     nlohmann::json tools = tool_defs();
@@ -319,6 +331,19 @@ nlohmann::json Agent::build_dialog(ModelTier tier) const
     dialog["tools"] = std::move(tools);
     dialog["messages"] = messages_;
     return dialog;
+}
+
+void Agent::session_start_hook(const std::string &source)
+{
+    session_context_.clear();
+    if (hooks_.empty()) return;
+    nlohmann::json p{{"matcher_key", source},
+                     {"agent_id", id_},
+                     {"cwd", workdir_},
+                     {"source", source},
+                     {"session_id", session_.id()}};
+    // deny 在这个位置拦不住任何东西（会话已经换了），hooks.cpp 会为此报一条
+    session_context_ = hooks_.run(HookEvent::SessionStart, p, &abort_).inject;
 }
 
 /* 模型回了话却没调工具。提醒它完成即 stop，同时防止其臆想新任务乱执行 */
@@ -386,7 +411,25 @@ void Agent::take_inbox()
         std::lock_guard<std::mutex> lk(mtx_);
         incoming.swap(inbox_);
     }
-    for (const std::string &m : incoming) record_user(m);
+    for (const std::string &m : incoming)
+    {
+        /* UserPromptSubmit（ADR-0024 §6）。**inject 附在这条消息后面，不进 system prompt**——
+         * 那会让每一轮的 system prompt 都不一样，prompt cache 当场碎（ADR-0022 §3）。 */
+        if (hooks_.empty())
+        {
+            record_user(m);
+            continue;
+        }
+        nlohmann::json p{{"agent_id", id_}, {"cwd", workdir_}, {"prompt", m}};
+        const HookOutcome h = hooks_.run(HookEvent::UserPromptSubmit, p, &abort_);
+        if (h.deny)
+        {
+            // 拦下就是这条消息不进历史。报出来，不静默吞
+            fprintf(stderr, "[hook] UserPromptSubmit 拦下一条消息：%s\n", h.reason.c_str());
+            continue;
+        }
+        record_user(h.inject.empty() ? m : m + "\n\n" + h.inject);
+    }
 }
 
 /* 把 thinking 块追加进 assistant content（thinking + signature）。
@@ -439,7 +482,17 @@ bool Agent::run_tools(const LlmOutcome &out)
         const bool interrupted = r["interrupted"];
         nlohmann::json content = r["content"];
         // 认字段不认名字：哪个工具能收工是工具自己说的，loop 不抄一份工具表
-        if (r.value("stop", false)) stopped = true;
+        if (r.value("stop", false))
+        {
+            stopped = true;
+            /* Stop（ADR-0024 §6）。**只观察，不改控制流**——出口仍然只有一个，
+             * 这个出口只是多了一个旁观者。 */
+            if (!hooks_.empty())
+            {
+                nlohmann::json p{{"agent_id", id_}, {"cwd", workdir_}};
+                hooks_.run(HookEvent::Stop, p, &abort_);
+            }
+        }
         /* 帧里的 status 是协议契约（PROTOCOL.md），保持 int：0 或 1。
          * bash 的退出码从此不进这个帧——TUI 一直只判 != 0，行为一个字不变。 */
         broadcast("tool_execution_end", nlohmann::json{{"name", tu.name},

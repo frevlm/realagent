@@ -18,7 +18,19 @@ namespace {
 nlohmann::json defaults()
 {
     // dangerous 工具执行前怎么裁决：ask 问用户（默认）/ allow-all 一律放行 / deny 一律拒绝
-    return {{"permission", "ask"}};
+    //
+    // mcp_http_bridge：`type: "http"` 的 MCP server 靠一个桥接进程说话（ADR-0024 §5）。
+    // **这是一个真默认值**（同 ADR-0016「默认值可以是真的了」），装完即可用；
+    // core 不硬编码包名——那会变成「core 决定去跑一个它没写的程序」，而 MCP 的判据是
+    // 命令由用户在配置里点名。改成空数组 = 不支持 http，遇到报一条人话。
+    //
+    // 占位符 {url} / {name} / {value}。**子数组是「每个 header 重复一次」的那一组**，
+    // 一个 header 都没有时整组不出现——边界写出来，不靠猜（`--header` 与它后面那个
+    // 占位符是一组，这件事从参数本身看不出来）。
+    return {{"permission", "ask"},
+            {"mcp_http_bridge",
+             {"npx", "-y", "mcp-remote", "{url}",
+              nlohmann::json::array({"--header", "{name}: {value}"})}}};
 }
 
 fs::path settings_path(const fs::path &dir) { return dir / ".realagent" / "settings.json"; }
@@ -105,6 +117,13 @@ std::string Config::get(std::string_view key) const
 {
     std::lock_guard<std::mutex> lk(*mutex_);
     return settings_.value(std::string(key), std::string());
+}
+
+nlohmann::json Config::get_json(std::string_view key) const
+{
+    std::lock_guard<std::mutex> lk(*mutex_);
+    const auto it = settings_.find(std::string(key));
+    return it == settings_.end() ? nlohmann::json() : *it;
 }
 
 bool Config::has(std::string_view key) const

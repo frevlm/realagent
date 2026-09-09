@@ -18,8 +18,11 @@
 #include <thread>
 #include <vector>
 
+#include "agent/agent_defs.hpp"
+#include "agent/commands.hpp"
 #include "agent/context.hpp"
 #include "agent/executor.hpp"
+#include "agent/hooks.hpp"
 #include "agent/session.hpp"
 #include "agent/skills.hpp"
 #include "json.hpp"
@@ -54,10 +57,35 @@ class Agent {
      * 客户端建的落 `<workdir>/.realagent/sessions/`，派生的落 `.../sessions/sub/`。
      * **两边都落盘**——不落盘的那份内存里丢不掉（idle 也释放不了），而且出了事查不了。
      * 清单只扫顶层，于是「不在会话列表里显示」不是一个开关，是落点的后果。 */
+    /* persona = agent 定义的正文（ADR-0024 §8），接在 system prompt 尾部。
+     * **core 那段永远在前**——只有一个 build_dialog，派生出来的走同一条路，
+     * 拿不到「不带 stop 契约」的 system prompt。 */
     Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
-          Agents *pool = nullptr, bool sub = false);
+          Agents *pool = nullptr, bool sub = false, std::string persona = {});
 
     int id() const { return id_; }
+    /* 这个 agent 看得见的 prompt 命令（GET /commands 与派发共用这一张表）。 */
+    const std::vector<PromptCommand> &commands() const { return commands_; }
+    /* 这个 agent 看得见的 agent 定义（spawn 的 `agent` 参数认这些名字）。 */
+    const std::vector<AgentDef> &agent_defs() const { return agent_defs_; }
+
+    /* 建这个 agent 时 plugin 那边出的问题：MCP 没连上的、hooks.json 读坏的。
+     * 它们本来只进 stderr，而 core 是常驻服务、用户看不见——`/plugins` 是唯一
+     * 把这笔账还给用户的地方（ADR-0023 §8）。 */
+    std::vector<std::string> plugin_errors() const
+    {
+        std::vector<std::string> all = mcp_.errors;
+        all.insert(all.end(), hooks_.errors().begin(), hooks_.errors().end());
+        return all;
+    }
+
+    /* 跑一遍 SessionStart hook，把它注入的文字记下来（ADR-0024 §6）。
+     * source 就是 Claude Code 那几个词（`startup` / `clear` / `resume`），
+     * hook 的 matcher 拿它来挑——名字照抄，改一个字母就等于吃不下现成的 hooks.json。
+     *
+     * 建 agent 时一次，`/new` 与 `/resume` 之后各一次：那三处都是"会话换了一份"。
+     * 注入的文字进 system prompt，与 skill 清单同一个位置。 */
+    void session_start_hook(const std::string &source);
 
     const std::string &workdir() const { return workdir_; }
 
@@ -157,6 +185,9 @@ class Agent {
      * ADR-0023 说的是「生死跟着组」，而组（ADR-0021）还没建——今天持有者是 agent。
      * 换成组只是换谁拿这个 Lease，计数机制不变（池里存的是 weak_ptr）。 */
     McpHub::Lease mcp_;
+    /* 这个 agent 看得见的 hook（ADR-0024 §6）。**排在 exe_ 前面**：Executor 拿的是
+     * 指向它的指针。同 skill 与命令，创建时扫一次、同期不变。 */
+    Hooks hooks_;
     /* Executor 的 inflight_ / interrupted_ 是**这一个 agent** 的状态，
      * 共享一个就会串味：中断 A 会把 B 的下一次工具调用一起拒掉。 */
     Executor exe_;
@@ -172,6 +203,17 @@ class Agent {
     /* 这个 agent 看得见的 skill（ADR-0022）。**创建时扫一次**，与 workdir 同期确定、
      * 同期不变：改了 skill 开个新 agent，跟配置「启动读一次」（ADR-0010）同一个作风。 */
     std::vector<Skill> skills_;
+    /* 这个 agent 看得见的 prompt 命令（ADR-0024 §7）。同上，创建时扫一次。
+     * 它不进 system prompt——命令是用户显式触发的，模型不需要知道有哪些。 */
+    std::vector<PromptCommand> commands_;
+    /* SessionStart hook 注入的那段文字，拼在 system prompt 尾部。**一个 hook 都没有
+     * 时它是空串**——system prompt 与加这个功能之前一个字不差（同 skills_prompt）。 */
+    std::string session_context_;
+    /* 这个 agent 看得见的 agent 定义（ADR-0024 §8）：它派生别人时用得上，
+     * 所以进自己的 system prompt。 */
+    std::vector<AgentDef> agent_defs_;
+    /* 派生它的那个 agent 交下来的角色正文。空 = 没指定。 */
+    std::string persona_;
     double run_cost_ = 0; // 本次 run 累计花费（USD），一次用户输入起算清零
     std::atomic<bool> abort_{false};
 

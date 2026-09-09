@@ -46,8 +46,12 @@ type Reply struct {
 
 // Command 是一条可用的斜杠命令（GET /commands，core 是唯一真相源）
 type Command struct {
-	Name        string `json:"name"`        // 不带 '/'
+	Name        string `json:"name"`        // 不带 '/'。plugin 来的是 "<plugin>:<名字>"
 	Description string `json:"description"` // 菜单展示用
+	// ArgumentHint 是 plugin 命令 frontmatter 里的 argument-hint，内置的没有
+	ArgumentHint string `json:"argument_hint"`
+	// Kind 是 "builtin"（core 的一个动作）或 "prompt"（plugin 带来的一段文字）
+	Kind string `json:"kind"`
 }
 
 // New 创建客户端。addr 形如 "127.0.0.1:12345"。
@@ -177,19 +181,13 @@ func (c *Client) RespondApproval(id string, allow bool) error {
 }
 
 // FetchCommands 拉取可用斜杠命令列表（GET /commands）。失败返回错误（TUI 降级为无菜单）。
-func (c *Client) FetchCommands() ([]Command, error) {
-	resp, err := c.hc.Get(c.url + "/commands")
-	if err != nil {
-		return nil, fmt.Errorf("获取命令列表失败: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("读取命令列表失败: %w", err)
-	}
+//
+// 带上 agentID：plugin 带来的 prompt 命令跟着那个 agent 的工作目录走（ADR-0024），
+// 不带就只有内置那三条。
+func (c *Client) FetchCommands(agentID int) ([]Command, error) {
 	var cmds []Command
-	if err := json.Unmarshal(data, &cmds); err != nil {
-		return nil, fmt.Errorf("解析命令列表失败: %s", string(data))
+	if err := c.getJSON("/commands", &cmds, map[string]any{"agent_id": agentID}); err != nil {
+		return nil, err
 	}
 	return cmds, nil
 }

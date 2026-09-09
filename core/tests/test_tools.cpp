@@ -436,7 +436,7 @@ int main()
             f << R"({"mcpServers":{"stub":{"command":")" << MCP_STUB_SERVER << R"("}}})";
         }
         McpHub hub;
-        auto lease = hub.open(g_home.string());
+        auto lease = hub.open(g_home.string(), nlohmann::json::array());
         CHECK(lease.errors.empty() && lease.conns.size() == 1, "连上了 stub");
 
         Config cfg = config_with("allow-all");
@@ -463,7 +463,7 @@ int main()
     printf("\n== MCP 工具照走权限那条路 ==\n");
     {
         McpHub hub;
-        auto lease = hub.open(g_home.string());
+        auto lease = hub.open(g_home.string(), nlohmann::json::array());
         Config cfg = config_with("deny");
         CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
         ApprovalCoordinator ap;

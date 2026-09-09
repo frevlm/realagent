@@ -32,7 +32,7 @@ TUI ◀──(2) 长生命周期单向流────────────  c
 | `POST /group/close` | 关掉调用方那一组，体 `{"client_id"}`。客户端正常退出前显式发一次；**断线满 60 秒 core 自己也会关**，那是兜底不是主路（ADR-0021） | ✅ |
 | `POST /message` | 提交用户消息，体 `{"client_id","agent_id","message"}` → 投进那个 agent 的收件箱。首字符为 `/` 时按斜杠命令处理，不投收件箱（见下「命令」节）。**`agent_id` 必填、无默认**——猜"就那一个吧"在第二个 agent 出现的当天就会变成"刚才那条消息发给谁了" | ✅ |
 | `POST /command` | 执行斜杠命令，体 `{"client_id","agent_id","command":"/new"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为。**agent 正在跑时立刻回 `{"ok":false,"error":"agent 正在运行…"}`**，不排队等（见下「忙碌与中断」） | ✅ |
-| `GET /commands` | 斜杠命令列表 `[{name, description}]`（TUI 菜单数据源，core 是唯一真相；`/new` `/resume` `/model`） | ✅ |
+| `GET /commands` | 斜杠命令列表 `[{name, description, argument_hint, kind}]`（TUI 菜单数据源，core 是唯一真相）。`kind` 为 `builtin`（`/new` `/resume` `/model`）或 `prompt`（plugin 带来的一段文字，ADR-0024）。**body 里可带 `agent_id`**——prompt 命令表跟着那个 agent 的工作目录走；不带就只回内置那三条 | ✅ |
 | `POST /interrupt` | 中止某个 agent 的 run，体 `{"client_id","agent_id"}`，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。多 agent 之后必须指名道姓，否则 Esc 一按全场停摆。core 侧置 abort 位 + 取消**这个 agent** 挂着的审批（`Agent::interrupt()` + `ApprovalCoordinator::cancel(agent_id)`）——一刀切会把「停下这一个」办成「全场停摆」。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——core 同时把在跑的 bash 进程组打掉（`Executor::interrupt()` → `interrupt_tool()`）。read/edit 跑得快，不设中断点 | ✅ |
 | `POST /approval-response` | 审批裁决回传（TUI → core），体 `{"id", "allow"}` | ✅ |
 | `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "owned_by", "context"}`，后两项来自模型数据表，查不到就只有 model | ✅ |

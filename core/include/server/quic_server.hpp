@@ -43,7 +43,9 @@ struct QuicCallbacks {
     /* 收到审批裁决（POST /approval-response）→ 交给审批协调器 */
     std::function<void(const std::string &id, bool allow)> on_approval_response;
     /* 斜杠命令列表（GET /commands）→ JSON 数组 [{name,description},...]。core 是唯一真相源。 */
-    std::function<std::string()> on_commands;
+    /* GET /commands。body 里可带 agent_id：prompt 命令表跟着 agent 的 workdir 走
+     * （ADR-0024 §7）。不带就只回内置那三条——老客户端照常能用。 */
+    std::function<std::string(const std::string &)> on_commands;
     /* 状态栏数据（GET /statusline）→ JSON 对象字符串 {"model":"...", ...}。
      * 与推送流的 status_update 帧（状态行，本次 run 实时数字）不是一回事 */
     std::function<std::string()> on_statusline;

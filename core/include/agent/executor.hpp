@@ -17,6 +17,7 @@
 
 #include "agent/approval.hpp"
 #include "agent/context.hpp"
+#include "agent/hooks.hpp"
 #include "mcp/mcp.hpp"
 #include "tools/tools.hpp"
 
@@ -33,7 +34,8 @@ class Executor {
     /* mcp 是这个 agent 手里那份 MCP 清单（Agent 持有，Executor 只读）。
      * 空 = 这里没有 MCP，工具表就只有内置那六个。 */
     Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
-             Agents *pool = nullptr, int agent_id = 0, const McpHub::Lease *mcp = nullptr);
+             Agents *pool = nullptr, int agent_id = 0, const McpHub::Lease *mcp = nullptr,
+             const Hooks *hooks = nullptr);
 
     /* 按名查定义：先内置，再 MCP。**MCP 的名字带前缀，撞不上内置那六个。**
      * 查不到返回 nullptr。 */
@@ -63,6 +65,8 @@ class Executor {
     Agents *pool_ = nullptr;
     int agent_id_ = 0;                   // 这个 executor 属于哪个 agent
     const McpHub::Lease *mcp_ = nullptr; // 这个 agent 看得见的 MCP 工具与连接
+    /* 这个 agent 看得见的 hook（ADR-0024 §6）。空 = 一个都没装，run 立即返回，零开销。 */
+    const Hooks *hooks_ = nullptr;
 
     /* spawn / send_message：它们要认识 Agents，所以实现在这儿而不在 tools.cpp——
      * tools/ 在 agent/ 下面，反过来包含就是层级倒挂。 */

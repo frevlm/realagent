@@ -3,6 +3,7 @@
  *
  * 直接编译 src/agent/skills.cpp + src/config.cpp，不起服务、不碰网络。验证：
  *   - 两处来源都扫得到，同名时 workdir 那份覆盖全局那份
+ *   - plugin 来的名字带前缀（`<plugin>:<目录名>`），不同名 plugin 之间撞不上（ADR-0024）
  *   - `description: >`（YAML 折叠标量）解析成一整句——这正是不手写解析器的理由
  *     （值原样交出，YAML 怎么定义就是什么，core 不加工）
  *   - 名字取目录名，路径是绝对路径
@@ -43,6 +44,16 @@ static int failures = 0;
 static void put_skill(const fs::path &root, const std::string &name, const std::string &body)
 {
     const fs::path dir = root / ".realagent" / "skills" / name;
+    fs::create_directories(dir);
+    std::ofstream(dir / "SKILL.md") << body;
+}
+
+/* 写一份装来的 plugin 里的 skill：<root>/.realagent/plugins/<plugin>/skills/<name>/SKILL.md
+ * 注意布局跟隐式那两处不同——装来的用 Claude Code 的文件名（ADR-0024 §1）。 */
+static void put_plugin_skill(const fs::path &root, const std::string &plugin,
+                             const std::string &name, const std::string &body)
+{
+    const fs::path dir = root / ".realagent" / "plugins" / plugin / "skills" / name;
     fs::create_directories(dir);
     std::ofstream(dir / "SKILL.md") << body;
 }
@@ -119,6 +130,33 @@ int main()
         CHECK(find(v, "empty-description") == nullptr, "description 是空串的跳过");
         CHECK(find(v, "onlylocal") != nullptr, "好的那些一个不少");
         CHECK(find(v, "commit") != nullptr, "坏 skill 不牵连同目录的别人");
+    }
+
+    printf("== plugin 来的 skill（ADR-0024）==\n");
+    {
+        const std::string md = "---\ndescription: 装来的\n---\n";
+        put_plugin_skill(home, "p1", "review", md);
+        put_plugin_skill(home, "p2", "review", md);                       // 另一个 plugin，同一个 skill 名
+        put_skill(home, "review", "---\ndescription: 我自己写的\n---\n"); // 隐式，无前缀
+        const std::vector<Skill> v = scan_skills(work.string());
+        CHECK(find(v, "p1:review") != nullptr, "装来的 skill 名字是 <plugin>:<目录名>");
+        CHECK(find(v, "p2:review") != nullptr, "不同名 plugin 的同名 skill 不互相覆盖");
+        const Skill *mine = find(v, "review");
+        CHECK(mine != nullptr && mine->description == "我自己写的",
+              "隐式 plugin 前缀为空——既有的名字一个字符都不变");
+    }
+
+    printf("== 同名 plugin 的两处：近的覆盖远的 ==\n");
+    {
+        put_plugin_skill(home, "dup", "one", "---\ndescription: 全局那份\n---\n");
+        put_plugin_skill(work, "dup", "one", "---\ndescription: 仓库那份\n---\n");
+        const std::vector<Skill> v = scan_skills(work.string());
+        const Skill *d = find(v, "dup:one");
+        CHECK(d != nullptr && d->description == "仓库那份", "同一个 plugin 的两份，workdir 那份赢");
+        int n = 0;
+        for (const Skill &k : v)
+            if (k.name == "dup:one") ++n;
+        CHECK(n == 1, "覆盖不是并存：只剩一条");
     }
 
     printf("== 提示词形状 ==\n");

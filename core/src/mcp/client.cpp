@@ -158,7 +158,7 @@ std::unique_ptr<McpClient> McpClient::start(const nlohmann::json &cfg, std::stri
             c->request("tools/list", std::move(params), nullptr, kStartupTimeoutMs, rerr);
         if (!res)
         {
-            err = cfg.at("name").get<std::string>() + ": " + rerr;
+            err = rerr; // 是哪个 server 由 hub 冠名——规格里已经没有名字了
             return nullptr;
         }
         if (const auto tools = res->find("tools"); tools != res->end() && tools->is_array())

@@ -361,7 +361,7 @@ void QuicServer::run()
                         else if (req.method == "GET" && req.path == "/commands")
                         {
                             // 斜杠命令列表（TUI 菜单数据源）。core 持有唯一真相，TUI 只渲染。
-                            send_json(c, sid, impl_->cbs.on_commands ? impl_->cbs.on_commands() : "[]");
+                            send_json(c, sid, impl_->cbs.on_commands ? impl_->cbs.on_commands(req.body) : "[]");
                         }
                         else if (req.method == "GET" && req.path == "/statusline")
                         {

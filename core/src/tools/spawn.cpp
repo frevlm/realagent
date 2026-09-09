@@ -20,8 +20,10 @@ nlohmann::json spawn_def()
         "out_edges: agent ids the new agent is permitted to send messages to.\n"
         "To receive its completion notice, include your own agent id in in_edges.\n"
         "Ids present in both lists establish bidirectional communication.\n"
-        "Both lists accept only your own agent id or known agent ids.",
-        R"({"type":"object","properties":{"workdir":{"type":"string","description":"working directory for the new agent, required"},"prompt":{"type":"string","description":"initial message handed to the new agent"},"in_edges":{"type":"array","items":{"type":"integer"},"description":"agent ids permitted to send messages to this agent and receive its completion notice"},"out_edges":{"type":"array","items":{"type":"integer"},"description":"agent ids this agent is permitted to send messages to"}},"required":["workdir","prompt"]})",
+        "Both lists accept only your own agent id or known agent ids.\n"
+        "agent: optional. The name of one of the agent definitions listed in your system prompt.\n"
+        "Its role description is appended to the new agent's system prompt.",
+        R"({"type":"object","properties":{"workdir":{"type":"string","description":"working directory for the new agent, required"},"prompt":{"type":"string","description":"initial message handed to the new agent"},"in_edges":{"type":"array","items":{"type":"integer"},"description":"agent ids permitted to send messages to this agent and receive its completion notice"},"out_edges":{"type":"array","items":{"type":"integer"},"description":"agent ids this agent is permitted to send messages to"},"agent":{"type":"string","description":"optional: name of an agent definition listed in your system prompt"}},"required":["workdir","prompt"]})",
         true);
 }
 

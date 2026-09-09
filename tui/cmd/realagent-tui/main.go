@@ -53,10 +53,11 @@ func waitEventCmd(ch <-chan client.Event) tea.Cmd {
 	}
 }
 
-// 拉取斜杠命令列表（启动时一次；失败静默降级为无菜单，不影响其余功能）
-func fetchCommandsCmd(c *client.Client) tea.Cmd {
+// 拉取斜杠命令列表（启动时一次；失败静默降级为无菜单，不影响其余功能）。
+// 带上 agentID：plugin 来的命令跟着那个 agent 的工作目录走（ADR-0024）。
+func fetchCommandsCmd(c *client.Client, agentID int) tea.Cmd {
 	return func() tea.Msg {
-		cmds, err := c.FetchCommands()
+		cmds, err := c.FetchCommands(agentID)
 		return commandsMsg{cmds: cmds, err: err}
 	}
 }
@@ -173,7 +174,7 @@ func approvalCmd(c *client.Client, id string, allow bool) tea.Cmd {
 // ==================== Bubble Tea 接口 ====================
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client), fetchStatusCmd(m.client),
+	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client, m.client.AgentID()), fetchStatusCmd(m.client),
 		fetchHistoryCmd(m.client, m.client.AgentID()))
 }
 
@@ -292,6 +293,8 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				text = renderModels(v.reply.Data)
 			case "new", "resume":
 				text = renderSessions(v.reply.Command, v.reply.Data, m.client.AgentID())
+			case "plugins":
+				text = renderPlugins(v.reply.Data)
 			}
 			m.emit("info", text)
 		case v.reply.Reply != "":
@@ -844,6 +847,68 @@ func describeCommand(name string, messages int) string {
 		return "📄 会话已切换"
 	}
 	return "✅ 命令已执行: /" + name
+}
+
+// renderPlugins 把 /plugins 渲染成多行 info 文本（ADR-0024）。
+//
+// 只读：装 = git clone 进 ~/.realagent/plugins/，卸 = 删掉那个目录。没有 enable/disable。
+// errors 那一段是 MCP 没连上、hooks.json 读坏的原话——core 是常驻服务，
+// 那些话本来只进 stderr，用户看不见。
+func renderPlugins(data json.RawMessage) string {
+	var p struct {
+		Plugins []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Version     string `json:"version"`
+			Root        string `json:"root"`
+			Implicit    bool   `json:"implicit"`
+			Skills      int    `json:"skills"`
+			Commands    int    `json:"commands"`
+			Agents      int    `json:"agents"`
+			MCPServers  int    `json:"mcp_servers"`
+			Hooks       int    `json:"hooks"`
+		} `json:"plugins"`
+		Errors []string `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return "✅ 命令已执行: /plugins"
+	}
+	var b strings.Builder
+	if len(p.Plugins) == 0 {
+		b.WriteString("一个 plugin 都没装。装法：git clone <repo> ~/.realagent/plugins/<name>")
+	}
+	for _, x := range p.Plugins {
+		name := x.Name
+		if x.Implicit {
+			name += "（本地）"
+		}
+		if x.Version != "" {
+			name += " v" + x.Version
+		}
+		b.WriteString("📦 " + name + "\n")
+		// 只列非零的：一行「skill 0 命令 0 agent 0」等于没说
+		var parts []string
+		for _, kv := range []struct {
+			n int
+			s string
+		}{{x.Skills, "skill"}, {x.Commands, "命令"}, {x.Agents, "agent 定义"},
+			{x.MCPServers, "MCP server"}, {x.Hooks, "hook"}} {
+			if kv.n > 0 {
+				parts = append(parts, fmt.Sprintf("%s %d", kv.s, kv.n))
+			}
+		}
+		if len(parts) > 0 {
+			b.WriteString("   " + strings.Join(parts, " · ") + "\n")
+		}
+		if x.Description != "" {
+			b.WriteString("   " + x.Description + "\n")
+		}
+		b.WriteString("   " + x.Root + "\n")
+	}
+	for _, e := range p.Errors {
+		b.WriteString("⚠️  " + e + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // renderSessions 把 /new /resume 的会话清单渲染为多行 info 文本。

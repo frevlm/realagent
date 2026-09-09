@@ -2,8 +2,10 @@
 
 #include <algorithm>
 
+#include "agent/commands.hpp"
 #include "agent/session.hpp"
 #include "llm/llm.hpp"
+#include "plugin.hpp"
 
 namespace realagent {
 
@@ -84,6 +86,8 @@ std::string ok_json(const char *name, nlohmann::json data)
 std::string cmd_new(Env &e, const std::string &)
 {
     e.agent.reset(); // 新建会话：清空历史 + 换一个 JSONL 文件（旧的留在盘上）
+    // 会话换了一份 → SessionStart 再跑一遍（source 名字照抄 Claude Code，matcher 靠它挑）
+    e.agent.session_start_hook("clear");
     return ok_json("new", sessions_payload(e.pool, e.agent));
 }
 
@@ -92,6 +96,7 @@ std::string cmd_resume(Env &e, const std::string &arg)
     // 无参 = 列会话（清单里 opened_by 标出自己在哪儿）；带 id = 恢复那一个。
     // 恢复失败保持原会话不动：宁可这条命令没生效，也不能把人扔进一段空白历史
     if (!arg.empty() && !e.agent.resume(arg)) return command_error("unknown session: " + arg);
+    if (!arg.empty()) e.agent.session_start_hook("resume"); // 只在真换了会话时跑
     return ok_json("resume", sessions_payload(e.pool, e.agent));
 }
 
@@ -114,6 +119,38 @@ std::string cmd_model(Env &e, const std::string &arg)
     return ok_json("model", models_payload(e.ctx));
 }
 
+/* /plugins：装了哪些、各贡献了什么、哪些出了问题（ADR-0024 §分期 7）。
+ *
+ * **只读**。没有 enable / disable——那正是 ADR-0016 铲掉的 `plugins.disabled`；
+ * 关掉一个 plugin 就是把目录删了，装一个就是 `git clone` 进去。
+ *
+ * 问题那一栏是 agent 手上那两份现成的（MCP 连不上的、hooks 读坏的）——
+ * 它们本来只进 stderr，而 core 是常驻服务，用户看不见（ADR-0023 §8 那笔账）。 */
+std::string cmd_plugins(Env &e, const std::string &)
+{
+    nlohmann::json arr = nlohmann::json::array();
+    for (const PluginInfo &p : plugin_infos(e.agent.workdir()))
+    {
+        // 什么都没带的隐式 plugin 不列：多数人的 ~/.realagent 就是空的，
+        // 列一行「0 0 0 0 0」只会让真有内容的那几行更难找
+        if (p.implicit && !p.skills && !p.commands && !p.agent_defs && !p.mcp_servers && !p.hooks)
+            continue;
+        arr.push_back(nlohmann::json{{"name", p.name},
+                                     {"description", p.description},
+                                     {"version", p.version},
+                                     {"root", p.root},
+                                     {"implicit", p.implicit},
+                                     {"skills", p.skills},
+                                     {"commands", p.commands},
+                                     {"agents", p.agent_defs},
+                                     {"mcp_servers", p.mcp_servers},
+                                     {"hooks", p.hooks}});
+    }
+    nlohmann::json errors = nlohmann::json::array();
+    for (const std::string &m : e.agent.plugin_errors()) errors.push_back(m);
+    return ok_json("plugins", nlohmann::json{{"plugins", arr}, {"errors", errors}});
+}
+
 struct CommandDef {
     const char *name; // 不带前导 '/'
     const char *description;
@@ -125,33 +162,63 @@ constexpr CommandDef kCommands[] = {
     {"new", "新建会话（清空当前对话，旧会话留在盘上）", cmd_new},
     {"resume", "查看会话列表（/resume <id> 恢复某个会话）", cmd_resume},
     {"model", "查看模型清单（/model <name> 切换主模型）", cmd_model},
+    {"plugins", "查看装了哪些 plugin、各带了什么（只读；装 = git clone 进目录，卸 = 删掉）",
+     cmd_plugins},
 };
 
 } // namespace
 
-nlohmann::json command_defs()
+bool is_builtin_command(const std::string &name)
+{
+    for (const CommandDef &c : kCommands)
+        if (name == c.name) return true;
+    return false;
+}
+
+nlohmann::json command_defs(const Agent *agent)
 {
     nlohmann::json arr = nlohmann::json::array();
     for (const CommandDef &c : kCommands)
-        arr.push_back(nlohmann::json{{"name", c.name}, {"description", c.description}});
+        arr.push_back(
+            nlohmann::json{{"name", c.name}, {"description", c.description}, {"kind", "builtin"}});
+    if (!agent) return arr; // 没指名道姓：prompt 命令表跟着 workdir 走，这里没有答案
+    for (const PromptCommand &c : agent->commands())
+        arr.push_back(nlohmann::json{{"name", c.name},
+                                     {"description", c.description},
+                                     {"argument_hint", c.argument_hint},
+                                     {"kind", "prompt"}});
     return arr;
 }
 
 std::string handle_command(CoreContext &ctx, Agents &pool, Agent &agent,
                            const std::string &input)
 {
-    auto lk = agent.try_lock();
-    if (!lk.owns_lock()) return command_error(AGENT_BUSY);
-
     // 首空白分词为命令名：/resume[ <id>]、/model[ <name>]
     const std::string cmd = input.substr(0, input.find(' '));
     // 命令参数：命令名之后去掉尾部空白的那一段（无参即空串）
     std::string arg = input.size() > cmd.size() ? input.substr(cmd.size() + 1) : std::string();
     while (!arg.empty() && arg.back() == ' ') arg.pop_back();
+    const std::string name = cmd.substr(1); // 去掉前导 '/'
 
-    Env env{ctx, pool, agent};
+    /* builtin：core 的一个动作。**锁在这一支里**——拿不到就回一句"忙着呢"，不排队等
+     * （见 AGENT_BUSY 那段：在事件循环线程上等锁 = 整个客户端假死）。 */
     for (const CommandDef &c : kCommands)
-        if (cmd.compare(1, std::string::npos, c.name) == 0) return c.run(env, arg);
+        if (name == c.name)
+        {
+            auto lk = agent.try_lock();
+            if (!lk.owns_lock()) return command_error(AGENT_BUSY);
+            Env env{ctx, pool, agent};
+            return c.run(env, arg);
+        }
+
+    /* prompt：一段要发出去的文字。**不拿锁**——它等价于用户打了一段字，
+     * 而 POST /message 本来就不拿锁（收件箱是个 deque，agent 忙也投得进去）。 */
+    for (const PromptCommand &c : agent.commands())
+        if (name == c.name)
+        {
+            agent.post(expand_arguments(c.body, arg));
+            return std::string("{\"status\":\"processing\"}");
+        }
     return command_error("unknown command: " + cmd);
 }
 

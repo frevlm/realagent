@@ -83,21 +83,37 @@ system prompt 里每个 skill 只占一行：名字、描述、绝对路径。�
 
 解析用 vendored 的 fkYAML 单头文件（`core/include/fkYAML.hpp`），与 `json.hpp` 同一条路子：不必安装、不必链库、`find_package` 仍旧是三个。**不手写 frontmatter 解析器**——skill 是从互联网抄来的第三方输入，形状不由 core 说了算；手写的那种不会报错，它会在没见过的写法上安静地给出错值（`description: >` 这种折叠标量在现实里占三成）。「不兜底」反对的是替用户擦屁股，不是反对按格式的真实定义去解析它。
 
-_Avoid_: `插件`、`plugin`、`扩展`、`extension`（[[ADR-0016]] 铲掉的是可加载的可执行体，skill 一行代码都不加载，两者不是一回事）、`read_skill`
+skill 是 [[Plugin（插件）]] 的一个成员，不是 plugin 本身——`~/.realagent/skills/` 与 `<workdir>/.realagent/skills/` 这两处，是那两个隐式 plugin 的 skill 目录。
+
+_Avoid_: `扩展`、`extension`（[[ADR-0016]] 铲掉的是可加载的可执行体，skill 一行代码都不加载，两者不是一回事）、`read_skill`
 
 ### **MCP Server（MCP 服务器）**:
 
-一个外部进程，说 MCP 协议，交出一组 [[Tool]]。**core 不加载它的代码**——它活在自己的进程里，两边隔着一条管道，不是一次函数调用。**跟 [[Protocol]] 不是一回事**：那个词在本表里专指对面 LLM 端点说哪套话（三套之一），与 MCP 无关，两边都别省略定语。
+一个外部进程，说 MCP 协议，交出一组 [[Tool]]。**core 不加载它的代码**——它活在自己的进程里，两边隔着一条管道，不是一次函数调用。**托管在网上的那些也一样是一个外部进程**：见下面的桥接。**跟 [[Protocol]] 不是一回事**：那个词在本表里专指对面 LLM 端点说哪套话（三套之一），与 MCP 无关，两边都别省略定语。
 
 **一份配置一个连接，进程级**，全部[[组（Group）]]、全部 [[Agent（代理）]]、全部[[工作目录（Workdir）]]共用。这不是省进程，是协议本身的形状：MCP 规范把工作区身份整个移出了连接（`roots` 于 `2026-07-28` 废弃，迁移到 tool 参数或 server 自己的配置），并且写死「一个 stdio 进程不是一次会话」、「工具集**不得**随连接而变」。按目录复制连接既拿不到不同的工具，也没有任何协议渠道能告诉对方它在哪个目录。
 
-配置**两处来源，同名近的覆盖远的**（`~/.realagent/mcp.json` 与 `<workdir>/.realagent/mcp.json`），跟 [[Skill（技能）]]同构：同一份 schema、同一个解析器，信封逐字照抄事实标准，外加一个 `enabled`。**同名整条覆盖，不逐字段合并**——一条启动规格是一束共变的东西（命令、参数、环境），拆开合并能拼出一个谁都没写过的启动命令。连接的键因此是**那份配置本身**，不只是名字——字面意义上：一条启动规格就是一份归一过的 JSON（`name` / `command` / `args` / `env`），键就是它 `dump()` 出来的那串，没有第二种表示。
+配置**两处来源，同名近的覆盖远的**（`~/.realagent/mcp.json` 与 `<workdir>/.realagent/mcp.json`），跟 [[Skill（技能）]]同构：同一份 schema、同一个解析器，信封逐字照抄事实标准，外加一个 `enabled`。**同名整条覆盖，不逐字段合并**——一条启动规格是一束共变的东西（命令、参数、环境），拆开合并能拼出一个谁都没写过的启动命令。连接的键因此是**那份启动规格本身**——字面意义上：规格就是一份归一过的 JSON（`command` / `args` / `env`），键就是它 `dump()` 出来的那串，没有第二种表示。
 
-因此**配置里没有「这个 server 在哪儿跑」这个旋钮**，也不展开任何 `${...}` 变量。别家安装说明里那个目录参数（`server-filesystem <dir>`、docker 的 `--mount src=`）**不是工作目录，是这个 server 被允许触碰的范围**——一个进程级共享的 server，它的可及范围是全局问题；让它跟着「哪个 agent 恰好在调用」漂移，就是让访问边界漂移。要用户写死一个绝对路径不是委屈他，是让他明确地授一次权。
+**名字不在规格里。** 进程由「要 exec 什么」决定，不由它叫什么决定：同一条命令在两个 [[Plugin（插件）]]里各配了一次（现成 plugin 里很常见），起一个进程就够，两个名字挂在租约上，工具名照旧靠各自的前缀分开。**共用进程不等于共用名字**——名字是配置给的标签，连接不该知道它。
+
+**`type: "http"` 在归一那一层就变成一条 stdio 规格**，靠一个桥接进程：
+
+    {"type":"http","url":"https://x/mcp"}  →  {"command":"npx","args":["-y","mcp-remote","https://x/mcp"]}
+
+于是 core 里没有第二种 transport——没有 curl POST、没有 SSE 解析、没有 OAuth，读线程与按 id 认领那一套一字不改。**特殊情况在归一那一层消失，下游一行不动。** 顺带白捡一条性质：同一个 url 被两个 [[Plugin（插件）]] 引用会共用一个桥接进程，因为归一后那份 JSON 一样，键就一样。
+
+桥接命令是**配置里的模板，有真默认值**（同 [[ADR-0016]]「默认值可以是真的了」）：一个键 `mcp_http_bridge`，占位符 `{url}` / `{name}` / `{value}`。**模板里的子数组是「每个 header 重复一次」的那一组**，一个 header 都没有时整组不出现——一条规则就把 header 并进同一个模板，不为它另开一个键。边界写出来不靠猜：`--header` 与它后面那个占位符是一组，这件事从参数自身看不出来。**core 不硬编码任何包名**——那会变成「core 决定去跑一个它没写的程序」，而 MCP 的判据是**命令由用户在配置里点名**。换个桥接工具改一行；改成空 = 不支持 http，遇到报一条人话。占位符**不写成 `${...}`**：那个形状在本表里专指别家客户端的变量，两者字面上就该分开。
+
+因此**配置里没有「这个 server 在哪儿跑」这个旋钮**。别家安装说明里那个目录参数（`server-filesystem <dir>`、docker 的 `--mount src=`）**不是工作目录，是这个 server 被允许触碰的范围**——一个进程级共享的 server，它的可及范围是全局问题；让它跟着「哪个 agent 恰好在调用」漂移，就是让访问边界漂移。
+
+**变量只展开一个：`${CLAUDE_PLUGIN_ROOT}`。** 判据是**这个变量有没有唯一答案**——`${workspaceFolder}` 那一类问的是「当前项目目录」，而一个进程级共享的连接面对 N 个 agent 就有 N 个答案，展开它就是让访问边界漂移；`${CLAUDE_PLUGIN_ROOT}` 问的是「这个 [[Plugin（插件）]] 装在哪」，一个 plugin 一个安装位置，跟谁在调用无关。白名单一个名字，不是一套变量系统。
+
+它在隐式 plugin 里出现就是错——`~/.realagent/mcp.json` 没有 plugin root。那份配置是用户自己写的，写死绝对路径不是委屈他，是让他明确地授一次权；而 plugin 里那份是作者写的，他不知道你的用户名，那句要求在那里等于让分发单元不成立。**授权动作因此换了位置：从「写一行配置」变成「装这个 plugin」。**
 
 **生死跟着谁需要它**：第一次要用的时候连上（同步，清单当场定死），最后一个用的人松手时断开。所有权边界应当是[[组（Group）]]（[[ADR-0021]]），但组还没建，今天拿着它的是 [[Agent（代理）]]——换成组只是换谁拿，计数机制不变。
 
-**名字是 `<配置里的键>__<server 那头的原名>`，非法字符换成 `_`，但不截断。** 前缀取配置的键，不取 server 自报的名字（MCP 规范说那个不保证唯一）。**换字符不换长度**，因为受害者不同：长度撞上了用户改一个词就好（前缀是他写的键），端点的报错还会指名道姓；字符是 server 起的名字，他一个字都改不动。**转发用的仍是原名**——规范化只发生在给模型看的那一面。
+**名字是 `<plugin 前缀>_<配置里的键>__<server 那头的原名>`，非法字符换成 `_`，但不截断。** 前缀取配置的键，不取 server 自报的名字（MCP 规范说那个不保证唯一）。plugin 前缀连同它后面那个下划线，**只在装来的 [[Plugin（插件）]] 上出现**——两个隐式 plugin 前缀为空，于是既有的名字一个字符都不变。分隔符也因此只有一个答案：单下划线连的是「身份」那一半，双下划线之后才是原名。**换字符不换长度**，因为受害者不同：长度撞上了用户改一个词就好（前缀是他写的键），端点的报错还会指名道姓；字符是 server 起的名字，他一个字都改不动。**转发用的仍是原名**——规范化只发生在给模型看的那一面。
 
 **坏 server 跳过**：连不上、握手失败的不进清单，错误原文进 stderr，core 照常起。同 `models.json` 那条先例（报错但不拒绝启动），不同 `settings.json` 那条（硬错退出）——为一个可选的外部进程拒绝建 agent，是把次要功能提成必需品。**用户当下看不见这件事**（core 是常驻服务），[[Skill（技能）]]今天也一样，是同一笔待还的账。
 
@@ -105,7 +121,93 @@ _Avoid_: `插件`、`plugin`、`扩展`、`extension`（[[ADR-0016]] 铲掉的�
 
 core **一个客户端能力都不声明**（`roots`/`sampling` 已废，`elicitation`/`tasks` 不做）。这不是克制，是拿协议换保证：规范禁止 server 索取客户端没声明的东西，于是那条「server 反过来问客户端」的链路根本不存在。
 
-_Avoid_: `插件`、`plugin`、`扩展`（core 不加载它，[[ADR-0016]] 那笔账算的是可加载的可执行体）、`工具容器`、`cwd`/`工作目录`（server 跟的是它自己的配置，不是任何 agent 的目录）、`会话`/`session`（一个连接不是一次会话，规范原话）、`握手`/`initialize`（只说无握手的那一版）
+_Avoid_: `扩展`（core 不加载它，[[ADR-0016]] 那笔账算的是可加载的可执行体）、`工具容器`、`cwd`/`工作目录`（server 跟的是它自己的配置，不是任何 agent 的目录）、`会话`/`session`（一个连接不是一次会话，规范原话）、`握手`/`initialize`（只说无握手的那一版）
+
+### **Plugin（插件）**:
+
+一个安装单元，也是 core 眼里**唯一的容器**：[[Skill（技能）]]、[[MCP Server（MCP 服务器）]]、[[Command（斜杠命令）]]、[[Hook（钩子）]]、[[Agent 定义（Agent Def）]]都是它的成员。只装了一个 MCP server 的目录，就是一个只有一个成员的 plugin——**没有第二种东西**。装 = 把目录放进去，卸 = 删掉它。
+
+**`plugin.json` 只是名片**（名字、描述、版本），**不描述自己有什么**——有什么由目录结构说了算。于是同一份数据不会有两个落点。
+
+**这不是 [[ADR-0016]] 铲掉的那个。** 那个是 core `dlopen` 别人的 `.so` 再调它的函数；这个一行代码都不加载，交出来的全是数据：一份 JSON、几份 markdown、一张启动规格表。判据一字未改——**core 里有没有多出一行不是自己写的代码**。
+
+**布局照抄 Claude Code**，不发明第二种（同 [[Skill（技能）]] 对 Agent Skills 规范的态度）：
+
+    <plugin>/
+      .claude-plugin/plugin.json    名片：描述、版本。**不描述自己有什么**
+      skills/<name>/SKILL.md
+      commands/<name>.md
+      agents/<name>.md
+      hooks/hooks.json
+      .mcp.json
+
+`/plugins` 列这张表：装了哪些、各带了什么、哪些出了问题。**只读**——没有 enable / disable，那正是 [[ADR-0016]] 铲掉的 `plugins.disabled`。它也是唯一一处把「MCP 没连上 / hooks 读坏了」还给用户的地方：那些话本来只进 stderr，而 core 是常驻服务。
+
+**前缀是 plugin 的一个字段，不是它的本质。** 装来的 plugin 前缀是它的名字，`~/.realagent/` 与 `<workdir>/.realagent/` 这两个**隐式 plugin** 前缀为空——于是既有的名字一个字符都不变，而第三方之间靠隔离消歧，不靠覆盖。一个字段，两种取值，没有分支。
+
+隔离与覆盖的分工是这样的：**同一个 plugin 内部照旧「同名近的覆盖远的」**（那是同一个人写的两份，他知道自己在覆盖谁）；**不同名的 plugin 之间不覆盖**（那是两个陌生人各写各的，静默覆盖谁都查不出为什么）。两处都装了同名 plugin，仍旧近的覆盖远的——同名就是同一个 plugin 的两个版本。
+
+**目录即安装**：`~/.realagent/plugins/<name>/` 与 `<workdir>/.realagent/plugins/<name>/`，装 = clone 进来，卸 = 删掉，更新 = `git pull`。**没有安装状态文件、没有版本锁、没有 marketplace**——那是包管理器的活，而 [[ADR-0016]] 铲掉的税目里就有一份「哪个装了、哪个关了」的状态。两级目录天生就是 Claude Code 的 user / project 两级 scope，不用为它设计任何东西。
+
+名字**取目录名**，不取 `plugin.json` 里的 `name`——同 [[Skill（技能）]]，文件系统已经保证唯一，读出来再比对只是给自己造一类要处理的错误。撞名就改目录名。
+
+_Avoid_: `扩展`、`extension`、`容器`（[[ADR-0016]] 里那个词指的是动态库）、`marketplace`（分发清单是另一件事，不是 plugin 本身）、`安装`作动词时指某种命令（装 plugin 就是把目录放进去）
+
+### **Command（斜杠命令）**:
+
+用户显式触发的一条指令，两类，**一张表**（`GET /commands` 是唯一真相源，每条带一个 `kind`）：
+
+- **内置**：core 的一个动作（`/new` / `/resume` / `/model`）。拿 agent 的锁，**直接返回结果，不投[[收件箱（Inbox）]]**。
+- **prompt**：[[Plugin（插件）]]带来的一段文字（`commands/<name>.md`，形状照抄 Claude Code）。**它不是一条命令，是一条消息的模板**——展开后投收件箱，不拿锁。让它回「忙着呢」等于把发消息这件事变得比原来更难。
+
+派发因此多**一个**分支，判的是「这条是 core 的一个动作，还是一段要发出去的文字」——一个真区别，同 `Executor::execute` 为 MCP 多的那一个。
+
+**内置的不可被覆盖**，理由同内置六个 [[Tool]]：覆盖掉 `/new` 就没法开新会话。装来的 plugin 带前缀（`/caveman:caveman-commit`）天然不撞，只有隐式 plugin 撞得上，那一条跳过并报出来。
+
+prompt 命令表跟着 [[Agent（代理）]]的[[工作目录（Workdir）]]走，于是 `GET /commands` **可以带一个 `agent_id`**；不带就只回内置那三条——不是降级，是那个问题在没有 agent 时没有答案（同 [[ADR-0022]] 砍掉项目级 settings 的判据）。
+
+从 md 里只取三样：`description`、`argument-hint`、正文。`allowed-tools` / `model` 不收——权限与模型档位不该由一段 markdown 决定。参数只认 `$ARGUMENTS`，它进的是 prompt 不是 shell，与用户自己打那段字没有区别。
+
+_Avoid_: `命令`单指内置那三条、`宏`、`模板命令`
+
+### **Hook（钩子）**:
+
+在 core 生命周期的某个点上跑一个外部程序。**只从 `hooks/hooks.json` 读，不内联 `plugin.json`。**
+
+**装即授权**：hook 不经 permission、不走审批——用户把这个 [[Plugin（插件）]]放进目录，就是同意了它在这些点上跑。
+
+形状是**一个位置问题**，不是两个函数：
+
+    run(Pre*, payload)  →  原来那件事  →  run(Post*, payload)
+
+一个 `run(event, payload)` 返回一个 Outcome（`deny` / `reason` / `inject`），**位置由事件名决定，签名不分家**——写成 `run_pre` / `run_post` 两个函数的话，后者的返回值永远被忽略，那是个骗人的接口。没装 hook 时 `run` 立即返回空 Outcome，零开销（同 skill 清单为空时那条）。
+
+**只在真有落点的地方成对**：工具执行有 `PreToolUse` / `PostToolUse`；`SessionStart`、`UserPromptSubmit`、`Stop` 只有前半。不为对称造名字——`SessionEnd` 在多 agent 里指哪件事答不上来，就别造。
+
+**`deny` 只能收紧，不能放宽**：hook 说 deny 就 deny，说别的一律当没说过。于是没有优先级表，它退化成权限链上的一个「与」，**一个 hook 永远不能把 `ask` 变成 `allow`**。post 位置收到 `deny` 要报一条，不静默丢。
+
+**一次事件一次进程**（照抄 Claude Code：现成的 hook 脚本读 stdin 到 EOF 就退）。常驻能省掉进程启动，但那要定义一条自己的协议，现成脚本一个都跑不了。**中断时直接杀**——hook 进程是这一个 [[Agent（代理）]]独占的，跟进程级共享的 [[MCP Server（MCP 服务器）]]不是一回事，杀它不会弄断别人。
+
+**原来那件事没做完，post 就不跑**（抛了、被中断）；工具报错算做完了，post 要跑并拿得到那个结果。判据是**有没有产出一个结果**——不用 RAII，它在这两种情况下的行为恰好是反的。
+
+_Avoid_: `插件`（[[Plugin（插件）]]是装它的那个目录）、`回调`、`中间件`、`能力槽`（[[ADR-0011]] 那个是「管线这一段由谁来干」，独占且必须有人填；hook 是旁挂，可以零个）
+
+### **Agent 定义（Agent Def）**:
+
+一份写给模型看的角色说明：[[Plugin（插件）]]里的 `agents/<name>.md`，frontmatter + 正文。
+**core 只当它是一段文字**——`spawn` 多一个可选参数 `agent`，给了名字就把那份正文
+接在被派生 [[Agent（代理）]]的 system prompt 后面。不加新工具（[[ADR-0018]] 那条不变），
+不加执行路径。
+
+**core 那段永远在前**（agent id、[[工作目录（Workdir）]]、`stop` 契约）。这不需要额外保证：
+Agent 只有一个类、一个 `build_dialog`，派生出来的走同一条路，拿不到「不带 stop 契约」的 system prompt。
+
+`tools` / `model` 两个字段**不收**：工具清单与模型档位不该由一段 markdown 决定。
+
+**由派生方解析**：它在自己的 system prompt 里看见了哪些名字，就该拿到哪一份正文。
+让被派生方按自己的 workdir 再查一次，会出现「模型看见的名字在那边不存在」。
+
+_Avoid_: `subagent 类型`、`角色`、`persona`（作独立名词用时）、`子 agent 模板`
 
 ### **Event（事件）**:
 
@@ -494,11 +596,12 @@ realagent/                  # 主仓库（core + tui + docs）
 │   │   ├── llm/            #   一次 LLM 调用：造请求 + SSE 解析 + 计价（llm.cpp）
 │   │   ├── tools/          #   内置六个工具：read / edit / bash / spawn / send_message / stop
 │   │   ├── mcp/            #   MCP 客户端与连接池（client.cpp / hub.cpp，ADR-0023）
-│   │   ├── agent/          #   agent loop、事件流、状态、工具执行、审批、skill 扫盘
+│   │   ├── agent/          #   agent loop、事件流、状态、工具执行、审批、skill 与命令扫盘
 │   │   ├── server/         #   QUIC/HTTP3 服务（quiche）、推送流、审批端点
 │   │   ├── config.cpp      #   配置：默认树 + settings.json 覆盖 + 点对点写回
+│   │   ├── plugin.cpp      #   扫描链：走过哪几站、什么顺序（ADR-0024）
 │   │   └── main.cpp        #   启动、事件循环、端点回调、斜杠命令
-│   ├── tests/              #   test_config / test_llm / test_session / test_skills / test_tools / test_agent
+│   ├── tests/              #   test_config / test_llm / test_session / test_skills / test_commands / test_tools / test_agent / test_mcp*
 │   └── CMakeLists.txt
 ├── tui/                    # Go + Bubble Tea 客户端（ADR-0007）
 │   ├── cmd/realagent-tui/

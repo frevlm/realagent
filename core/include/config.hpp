@@ -4,7 +4,8 @@
  * 分层两级（ADR-0010）：代码里的默认打底（config.cpp 的 defaults()），
  * ~/.realagent/settings.json 覆盖。不看 cwd，不看项目目录，没有 env 那一层。
  *
- * 有默认值的键只有一个：permission（安全默认）。其余键缺了就是空串。
+ * 有默认值的键两个：permission（安全默认）与 mcp_http_bridge（http 桥接命令模板，
+ * ADR-0024 §5）。其余键缺了就是空串。
  * 端点那一束（protocol / base_url / model）坚持不给默认，理由见 llm.hpp。
  *
  * 没有"必需键"：配置缺失不是错误状态，只是取到默认值，load() 不校验缺了什么。
@@ -52,6 +53,10 @@ class Config {
 
     // 读取配置项（合并后的值；未知键返回空串）
     std::string get(std::string_view key) const;
+
+    // 同上，但原样取那个 JSON 值——给数组一类不是字符串的配置项用
+    // （今天只有 mcp_http_bridge）。未知键返回 null。
+    nlohmann::json get_json(std::string_view key) const;
     bool has(std::string_view key) const;
 
     // 按档位取模型名（键名只此一处知道）

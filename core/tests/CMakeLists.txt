@@ -22,7 +22,7 @@ target_include_directories(test_session PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../i
 add_test(NAME session COMMAND test_session)
 
 # skill 扫盘与 frontmatter 解析（ADR-0022：两处来源、近的覆盖远的、坏的跳过）
-add_executable(test_skills test_skills.cpp ../src/agent/skills.cpp ../src/config.cpp)
+add_executable(test_skills test_skills.cpp ../src/agent/skills.cpp ../src/agent/frontmatter.cpp ../src/config.cpp ../src/plugin.cpp)
 target_include_directories(test_skills PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 add_test(NAME skills COMMAND test_skills)
 
@@ -30,9 +30,9 @@ add_test(NAME skills COMMAND test_skills)
 add_executable(test_tools test_tools.cpp
                           ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
                           ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
-                          ../src/agent/executor.cpp
-                          ../src/agent/agents.cpp ../src/agent/agent.cpp ../src/agent/session.cpp
-                          ../src/agent/skills.cpp
+                          ../src/agent/executor.cpp ../src/agent/hooks.cpp
+                          ../src/agent/agents.cpp ../src/agent/agent.cpp ../src/agent/agent_defs.cpp ../src/agent/command.cpp ../src/agent/commands.cpp ../src/agent/session.cpp
+                          ../src/agent/skills.cpp ../src/agent/frontmatter.cpp
                           ../src/mcp/client.cpp ../src/mcp/hub.cpp
                           ../src/llm/llm.cpp
                           ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
@@ -40,7 +40,7 @@ add_executable(test_tools test_tools.cpp
                           ../src/llm/downstream/anthropic_messages.cpp
                           ../src/llm/downstream/openai_chat.cpp
                           ../src/llm/downstream/openai_responses.cpp
-                          ../src/agent/approval.cpp ../src/config.cpp)
+                          ../src/agent/approval.cpp ../src/config.cpp ../src/plugin.cpp)
 target_include_directories(test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(test_tools PRIVATE ${CURL_LIBRARIES})
 target_compile_definitions(test_tools PRIVATE MCP_STUB_SERVER="$<TARGET_FILE:mcp_stub_server>")
@@ -50,15 +50,15 @@ add_test(NAME tools COMMAND test_tools)
 # agent 的收件箱与线程生命周期（ADR-0019）。端点没配，LLM 调用当场失败——
 # 这里验的是消息进出收件箱，不是模型回了什么，所以不碰网络。
 add_executable(test_agent test_agent.cpp
-  ../src/agent/agent.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/approval.cpp
-  ../src/agent/session.cpp ../src/agent/skills.cpp ../src/llm/llm.cpp
+  ../src/agent/agent.cpp ../src/agent/agent_defs.cpp ../src/agent/command.cpp ../src/agent/commands.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/hooks.cpp ../src/agent/approval.cpp
+  ../src/agent/session.cpp ../src/agent/skills.cpp ../src/agent/frontmatter.cpp ../src/llm/llm.cpp
   ../src/mcp/client.cpp ../src/mcp/hub.cpp
   ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
   ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
   ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
   ../src/llm/upstream/openai_responses.cpp ../src/llm/downstream/anthropic_messages.cpp
   ../src/llm/downstream/openai_chat.cpp ../src/llm/downstream/openai_responses.cpp
-  ../src/config.cpp)
+  ../src/config.cpp ../src/plugin.cpp)
 target_include_directories(test_agent PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(test_agent PRIVATE ${CURL_LIBRARIES})
 add_test(NAME agent COMMAND test_agent)
@@ -74,8 +74,50 @@ target_compile_definitions(test_mcp PRIVATE MCP_STUB_SERVER="$<TARGET_FILE:mcp_s
 add_dependencies(test_mcp mcp_stub_server)
 add_test(NAME mcp COMMAND test_mcp)
 
-add_executable(test_mcp_hub test_mcp_hub.cpp ../src/mcp/hub.cpp ../src/mcp/client.cpp ../src/config.cpp)
+add_executable(test_mcp_hub test_mcp_hub.cpp ../src/mcp/hub.cpp ../src/mcp/client.cpp ../src/config.cpp ../src/plugin.cpp)
 target_include_directories(test_mcp_hub PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_definitions(test_mcp_hub PRIVATE MCP_STUB_SERVER="$<TARGET_FILE:mcp_stub_server>")
 add_dependencies(test_mcp_hub mcp_stub_server)
 add_test(NAME mcp_hub COMMAND test_mcp_hub)
+
+# prompt 命令：扫盘、前缀、内置不可覆盖、$ARGUMENTS（ADR-0024 §7）
+add_executable(test_commands test_commands.cpp ../src/agent/commands.cpp
+               ../src/agent/command.cpp ../src/agent/agent.cpp ../src/agent/agent_defs.cpp ../src/agent/agents.cpp
+               ../src/agent/executor.cpp ../src/agent/hooks.cpp ../src/agent/approval.cpp ../src/agent/session.cpp
+               ../src/agent/skills.cpp ../src/agent/frontmatter.cpp
+               ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
+               ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp
+               ../src/tools/stop.cpp
+               ../src/mcp/client.cpp ../src/mcp/hub.cpp ../src/llm/llm.cpp
+               ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
+               ../src/llm/upstream/openai_responses.cpp
+               ../src/llm/downstream/anthropic_messages.cpp ../src/llm/downstream/openai_chat.cpp
+               ../src/llm/downstream/openai_responses.cpp
+               ../src/config.cpp ../src/plugin.cpp)
+target_include_directories(test_commands PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_commands PRIVATE ${CURL_LIBRARIES})
+add_test(NAME commands COMMAND test_commands)
+
+# hook：扫盘、执行、deny 只收紧、超时不卡死（ADR-0024 §6）
+add_executable(test_hooks test_hooks.cpp ../src/agent/hooks.cpp ../src/config.cpp ../src/plugin.cpp)
+target_include_directories(test_hooks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+add_test(NAME hooks COMMAND test_hooks)
+
+# 端到端：一个照抄 Claude Code 布局的 plugin，五样成员一次吃下（ADR-0024）
+add_executable(test_plugin_e2e test_plugin_e2e.cpp
+               ../src/agent/skills.cpp ../src/agent/commands.cpp ../src/agent/command.cpp
+               ../src/agent/agent_defs.cpp ../src/agent/hooks.cpp ../src/agent/frontmatter.cpp
+               ../src/agent/agent.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp
+               ../src/agent/approval.cpp ../src/agent/session.cpp
+               ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
+               ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp
+               ../src/tools/stop.cpp
+               ../src/mcp/client.cpp ../src/mcp/hub.cpp ../src/llm/llm.cpp
+               ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
+               ../src/llm/upstream/openai_responses.cpp
+               ../src/llm/downstream/anthropic_messages.cpp ../src/llm/downstream/openai_chat.cpp
+               ../src/llm/downstream/openai_responses.cpp
+               ../src/config.cpp ../src/plugin.cpp)
+target_include_directories(test_plugin_e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_plugin_e2e PRIVATE ${CURL_LIBRARIES})
+add_test(NAME plugin_e2e COMMAND test_plugin_e2e)

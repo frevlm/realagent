@@ -129,7 +129,12 @@ int main(int argc, char **argv)
 
     QuicCallbacks cbs;
     // 斜杠命令列表（GET /commands，TUI 菜单数据源）
-    cbs.on_commands = []() { return command_defs().dump(); };
+    cbs.on_commands = [&pool](const std::string &body) {
+        // agent_id 可选：prompt 命令表跟着那个 agent 的 workdir 走，不带就只有内置那三条
+        const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const int id = j.is_object() ? j.value("agent_id", 0) : 0;
+        return command_defs(id > 0 ? pool.find(id) : nullptr).dump();
+    };
 
     // POST /agent：建一个 agent。workdir 必传，core 不猜
     cbs.on_agent = [&](const std::string &body) {
