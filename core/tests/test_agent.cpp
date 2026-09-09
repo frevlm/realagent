@@ -8,6 +8,9 @@
  *
  * 端点没配（默认树里 base_url 为空），LLM 调用当场失败——正好：
  * 这里要验的是消息进出收件箱，不是模型回了什么。
+ *
+ * 图那几段之后还验一件事：`spawn` 的 `agent` 参数（ADR-0024 §8）——认得的名字把那份
+ * 正文接进新 agent 的 system prompt，认不得的当场失败且**不留下一个新 agent**。
  */
 #include <unistd.h>
 
@@ -19,9 +22,11 @@
 #include <thread>
 
 #include "agent/agent.hpp"
+#include "agent/agent_defs.hpp"
 #include "agent/agents.hpp"
 #include "agent/approval.hpp"
 #include "agent/context.hpp"
+#include "agent/executor.hpp"
 #include "agent/session.hpp"
 #include "config.hpp"
 
@@ -42,6 +47,15 @@ static int failures = 0;
             ++failures;                  \
         }                                \
     } while (0)
+
+/* 工具结果里那几段文字接起来 */
+static std::string text_of(const nlohmann::json &r)
+{
+    std::string s;
+    for (const auto &b : r.value("content", nlohmann::json::array()))
+        if (b.value("type", std::string()) == "text") s += b.value("text", std::string());
+    return s;
+}
 
 /* 问这个 agent 记了什么：**问盘，不问内存**。idle 的 agent 内存里那份已经还回去了
  * （ADR-0019 §7），盘上那份才是一直在的那一份。 */
@@ -70,6 +84,8 @@ int main()
     fs::remove_all(home);
     fs::create_directories(home / ".realagent");
     ::setenv("HOME", home.c_str(), 1);
+    // spawn 是危险工具。这里验的是它派生出什么，不是权限链——权限有 test_tools 管
+    std::ofstream(home / ".realagent" / "settings.json") << R"({"permission":"allow-all"})";
 
     auto cfg = Config::load();
     if (!cfg)
@@ -203,6 +219,51 @@ int main()
         CHECK(dtop == (wd / ".realagent" / "sessions").string(), "客户端建的落 sessions/");
         CHECK(dsub == (wd / ".realagent" / "sessions" / "sub").string(), "派生的落 sessions/sub/");
         CHECK(dtop != dsub, "两个落点不同——清单只扫顶层，于是 sub 的不进列表");
+    }
+
+    printf("== spawn 的 agent 参数：认得的接上正文，认不得当场失败（ADR-0024 §8） ==\n");
+    {
+        /* 隐式 plugin（`~/.realagent/agents/`）里放一份定义：名字不带前缀，取文件名。
+         * 走真的扫盘，于是「模型在 system prompt 里看见的名字」与「spawn 认的名字」
+         * 是同一个来源——这正是这个参数唯一会坏的地方。 */
+        fs::create_directories(home / ".realagent" / "agents");
+        std::ofstream(home / ".realagent" / "agents" / "builder.md")
+            << "---\ndescription: 只改一两个文件\n---\nBODY_MARK 一个文件最好。\n";
+        const std::vector<AgentDef> defs = scan_agent_defs(home.string());
+        CHECK(defs.size() == 1 && defs[0].name == "builder", "扫到一份，名字取文件名");
+
+        Agents pool(ctx, approval);
+        std::string err;
+        const int me = pool.create(home.string(), 0, {}, {}, err);
+        Executor exe(ctx, approval, home.string(), &pool, me, nullptr, nullptr, &defs);
+        const auto spawn = [&](const std::string &agent) {
+            nlohmann::json p{{"workdir", home.string()}, {"prompt", "干活"}};
+            if (!agent.empty()) p["agent"] = agent;
+            return exe.execute("call-1", "spawn", p.dump());
+        };
+
+        const nlohmann::json bad = spawn("nope");
+        CHECK(bad.value("isError", false), "认不出的名字：当场失败");
+        CHECK(text_of(bad).find("nope") != std::string::npos, "错误里点名是哪个名字");
+        CHECK(pool.list().size() == 1, "失败就没有新 agent——不悄悄派生一个没接上正文的");
+
+        const nlohmann::json ok = spawn("builder");
+        CHECK(!ok.value("isError", true), "认得的名字：派生成功");
+        const int id = std::atoi(text_of(ok).c_str());
+        const Agent *nb = id > 0 ? pool.find(id) : nullptr;
+        CHECK(nb != nullptr, "新 agent 在图上");
+        const std::string sp = nb ? nb->system_prompt() : std::string();
+        CHECK(sp.find("BODY_MARK") != std::string::npos, "那份正文接进了它的 system prompt");
+        CHECK(sp.find("`stop`") != std::string::npos &&
+                  sp.find("`stop`") < sp.find("BODY_MARK"),
+              "core 那段与 stop 契约在它前面——派生出来的走的是同一个 system_prompt()");
+
+        // 不给 agent 参数：与加这个功能之前一个字不差
+        const nlohmann::json plain = spawn("");
+        const int id2 = std::atoi(text_of(plain).c_str());
+        const Agent *nb2 = id2 > 0 ? pool.find(id2) : nullptr;
+        CHECK(nb2 && nb2->system_prompt().find("BODY_MARK") == std::string::npos,
+              "不给 agent 参数就一个字都不接");
     }
 
     printf(failures ? "\nFAILED (%d)\n" : "\nALL PASS\n", failures);

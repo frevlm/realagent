@@ -17,6 +17,10 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include "plugin.hpp"
 
 namespace realagent {
 
@@ -32,5 +36,20 @@ struct Frontmatter {
  * （ADR-0022）；command 的正文归 core，它就是要发出去的那段话（ADR-0024 §7）。 */
 std::optional<Frontmatter> read_frontmatter(const std::filesystem::path &md, bool with_body,
                                             std::string &err);
+
+/* 一个 `.md` 目录里的文件：`<qualify 过的名字, 路径>`，**排过序**。
+ * directory_iterator 的顺序是未指定的——不排，同一个目录两次运行给出的表就不一样。
+ * 目录不存在返回空表，不是错：多数人一条 command、一份 agent 定义都没有。 */
+std::vector<std::pair<std::string, std::filesystem::path>>
+md_files(const PluginRoot &r, const std::filesystem::path &dir);
+
+/* 读一份 md，并把正文里的 `${CLAUDE_PLUGIN_ROOT}` 展开。
+ *
+ * 读不出来、展开不了都返回 nullopt，原话进 stderr（`tag` 是方括号里那个词）——
+ * 这些文件是 N 份各自独立的输入，**一份坏了不让同目录的别人变得可疑**。
+ *
+ * 报错与展开这两步三个扫描器一字不差，所以只写在这儿；「哪些字段作数」各扫各的。 */
+std::optional<Frontmatter> load_md(const std::filesystem::path &md, const PluginRoot &r,
+                                   const char *tag, bool with_body);
 
 } // namespace realagent

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 
+#include "agent/agent_defs.hpp"
 #include "agent/approval.hpp"
 #include "agent/context.hpp"
 #include "agent/hooks.hpp"
@@ -33,9 +34,12 @@ class Executor {
      * 而这里根本不需要它——Agent 的 pool_ / id_ 在 exe_ 之前就已经就位了。 */
     /* mcp 是这个 agent 手里那份 MCP 清单（Agent 持有，Executor 只读）。
      * 空 = 这里没有 MCP，工具表就只有内置那六个。 */
+    /* defs 是这个 agent 看得见的 agent 定义（同 mcp / hooks：Agent 持有，Executor 只读）。
+     * `spawn` 的 `agent` 参数就认这张表里的名字——**它与写进 system prompt 的是同一张**，
+     * 所以不回头去问 pool 要：那会多出「找不到自己」这个到不了的分支。 */
     Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
              Agents *pool = nullptr, int agent_id = 0, const McpHub::Lease *mcp = nullptr,
-             const Hooks *hooks = nullptr);
+             const Hooks *hooks = nullptr, const std::vector<AgentDef> *defs = nullptr);
 
     /* 按名查定义：先内置，再 MCP。**MCP 的名字带前缀，撞不上内置那六个。**
      * 查不到返回 nullptr。 */
@@ -67,6 +71,8 @@ class Executor {
     const McpHub::Lease *mcp_ = nullptr; // 这个 agent 看得见的 MCP 工具与连接
     /* 这个 agent 看得见的 hook（ADR-0024 §6）。空 = 一个都没装，run 立即返回，零开销。 */
     const Hooks *hooks_ = nullptr;
+    /* 这个 agent 看得见的 agent 定义（ADR-0024 §8）。空 = 这里没有图，也就没有 spawn。 */
+    const std::vector<AgentDef> *defs_ = nullptr;
 
     /* spawn / send_message：它们要认识 Agents，所以实现在这儿而不在 tools.cpp——
      * tools/ 在 agent/ 下面，反过来包含就是层级倒挂。 */

@@ -21,14 +21,15 @@ std::string session_dir_of(const std::string &workdir, bool sub)
 } // namespace
 
 Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
-             Agents *pool, bool sub, std::string persona)
+             Agents *pool, bool sub, std::string def_body)
     : ctx_(ctx), pool_(pool), id_(id), workdir_(std::move(workdir)),
       mcp_(ctx.mcp ? ctx.mcp->open(workdir_, ctx.config->get_json("mcp_http_bridge"))
                    : McpHub::Lease{}),
-      hooks_(Hooks::scan(workdir_)), exe_(ctx, approval, workdir_, pool_, id_, &mcp_, &hooks_),
+      hooks_(Hooks::scan(workdir_)), agent_defs_(scan_agent_defs(workdir_)),
+      exe_(ctx, approval, workdir_, pool_, id_, &mcp_, &hooks_, &agent_defs_),
       session_dir_(session_dir_of(workdir_, sub)),
       session_(session_dir_), skills_(scan_skills(workdir_)), commands_(scan_commands(workdir_)),
-      agent_defs_(scan_agent_defs(workdir_)), persona_(std::move(persona))
+      def_body_(std::move(def_body))
 {
     /* 连不上的 server 只报不拦（models.json 那条先例）。用户当下看不见这行——
      * core 是常驻服务，面前只有 TUI。这笔债 skill 也欠着，一并另算（ADR-0023 §8）。 */
@@ -303,26 +304,30 @@ bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out)
     return true;
 }
 
+std::string Agent::system_prompt() const
+{
+    // stop 的契约必须写在这儿。模型不知道有这个出口就不会调它
+    return "You are a helpful coding agent. Your agent id is " + std::to_string(id_) +
+           ". Your working directory is " + workdir_ + ".\n"
+                                                       "You run in an autonomous loop: calling `stop` is the only way to end your run. Whenever you finish answering a question or completing a task, output your response and call `stop` in the same turn. Do not invent tasks the user did not request.\n\n"
+                                                       "Example:\n"
+                                                       "User: Explain this function.\n"
+                                                       "Assistant: [Explains the function] + tool_call: stop()" +
+           // skill 清单（ADR-0022）。一个都没有时这里是空串——system prompt 与加这个功能之前一个字不差
+           skills_prompt(skills_) +
+           // 可以拿去 spawn 的 agent 定义（ADR-0024 §8）。同上，一个都没有就是空串
+           agent_defs_prompt(agent_defs_) +
+           // 派生方交下来的那份 agent 定义正文。**接在最后**：core 那段与 stop 契约永远在它前面
+           (def_body_.empty() ? std::string() : "\n\n" + def_body_) +
+           // SessionStart hook 注入的那段（ADR-0024 §6）。同上，没有就是空串
+           (session_context_.empty() ? std::string() : "\n\n" + session_context_);
+}
+
 nlohmann::json Agent::build_dialog(ModelTier tier) const
 {
     nlohmann::json dialog;
     dialog["model"] = ctx_.config->model(tier);
-    // stop 的契约必须写在这儿。模型不知道有这个出口就不会调它
-    dialog["system"] =
-        "You are a helpful coding agent. Your agent id is " + std::to_string(id_) +
-        ". Your working directory is " + workdir_ + ".\n"
-                                                    "You run in an autonomous loop: calling `stop` is the only way to end your run. Whenever you finish answering a question or completing a task, output your response and call `stop` in the same turn. Do not invent tasks the user did not request.\n\n"
-                                                    "Example:\n"
-                                                    "User: Explain this function.\n"
-                                                    "Assistant: [Explains the function] + tool_call: stop()" +
-        // skill 清单（ADR-0022）。一个都没有时这里是空串——system prompt 与加这个功能之前一个字不差
-        skills_prompt(skills_) +
-        // 可以拿去 spawn 的 agent 定义（ADR-0024 §8）。同上，一个都没有就是空串
-        agent_defs_prompt(agent_defs_) +
-        // 派生方交下来的角色正文。**接在最后**：core 那段与 stop 契约永远在它前面
-        (persona_.empty() ? std::string() : "\n\n" + persona_) +
-        // SessionStart hook 注入的那段（ADR-0024 §6）。同上，没有就是空串
-        (session_context_.empty() ? std::string() : "\n\n" + session_context_);
+    dialog["system"] = system_prompt();
     /* 工具定义**就是端点要的那个对象**：拷一份，抹掉 core 私有的那一个键（ADR-0023 §2）。
      * LLM 见到的名字与 executor 查表用的名字是同一个。 */
     nlohmann::json tools = tool_defs();

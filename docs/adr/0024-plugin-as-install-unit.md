@@ -238,8 +238,12 @@ run(Pre*, payload)  →  原来那件事  →  run(Post*, payload)
 
 不加新工具（ADR-0018 那条不变），不加执行路径。`tools` / `model` 两个字段不收，理由同 §7。
 
+`name` 也不收：**名字取文件名**，与 skill 取目录名、command 取文件名同一条规则。
+一份文件在盘上叫什么，模型看见的就是什么——多一个可以与文件名不一致的字段，
+就多一种「清单里那个名字在盘上找不到」的坏法。
+
 **core 那段（agent id / workdir / `stop` 契约）永远在前**。这不需要额外保证：
-`Agent` 只有一个类、一个 `build_dialog`，派生出来的走同一条路，
+`Agent` 只有一个类、一个 `system_prompt()`，派生出来的走同一条路，
 拿不到「不带 stop 契约」的 system prompt。
 
 ### 9. 内置的不参与

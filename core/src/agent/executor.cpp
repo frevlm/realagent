@@ -10,9 +10,9 @@ namespace realagent {
 
 Executor::Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
                    Agents *pool, int agent_id, const McpHub::Lease *mcp,
-                   const Hooks *hooks)
+                   const Hooks *hooks, const std::vector<AgentDef> *defs)
     : ctx_(ctx), approval_(approval), workdir_(std::move(workdir)), pool_(pool),
-      agent_id_(agent_id), mcp_(mcp), hooks_(hooks)
+      agent_id_(agent_id), mcp_(mcp), hooks_(hooks), defs_(defs)
 {
 }
 
@@ -200,26 +200,27 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
 
     /* spawn：派生方决定新 agent 的全部出入边（ADR-0019），也由它解析 `agent`（ADR-0024 §8）——
      * 它在自己的 system prompt 里看见了哪些名字，就该拿到哪一份正文。让被派生方按自己的
-     * workdir 再查一次，会出现「模型看见的名字在那边不存在」。 */
-    std::string persona;
+     * workdir 再查一次，会出现「模型看见的名字在那边不存在」。
+     * 查的就是写进 system prompt 的那张表（`defs_`），不是回头问 pool 要。 */
+    std::string def_body;
     if (const std::string want = str("agent"); !want.empty())
     {
-        const Agent *me = pool_->find(agent_id_);
-        bool known = false;
-        if (me)
-            for (const AgentDef &d : me->agent_defs())
-                if (d.name == want)
+        const AgentDef *d = nullptr;
+        if (defs_)
+            for (const AgentDef &x : *defs_)
+                if (x.name == want)
                 {
-                    persona = d.body;
-                    known = true;
+                    d = &x;
+                    break;
                 }
-        // 认不出就当场说，不悄悄派生一个没有角色的 agent
-        if (!known) return tool_fail("unknown agent definition: " + want);
+        // 认不出就当场说，不悄悄派生一个没接上正文的 agent
+        if (!d) return tool_fail("unknown agent definition: " + want);
+        def_body = d->body;
     }
 
     std::string err;
     const int id = pool_->create(str("workdir"), agent_id_, id_list(params, "in_edges"),
-                                 id_list(params, "out_edges"), err, persona);
+                                 id_list(params, "out_edges"), err, def_body);
     if (id <= 0) return tool_fail(err);
     pool_->post(id, str("prompt"));
     return tool_ok(std::to_string(id));

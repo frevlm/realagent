@@ -31,13 +31,13 @@ class Agents {
      * by <= 0 为人（客户端）建的，人不是图上的节点。
      * in / out 是新 agent 的入边与出边（数字 id）：派生方决定它被谁知道、能找谁。
      * 成功返回新 agent 的数字 id (>0)，失败返回 0 并写 err。 */
-    /* persona 是 agent 定义的正文（ADR-0024 §8），接在新 agent 的 system prompt 后面。
+    /* def_body 是 agent 定义的正文（ADR-0024 §8），接在新 agent 的 system prompt 后面。
      * 空 = 没指定，system prompt 与加这个功能之前一个字不差。
      * **由派生方解析好再传**：它在自己的 system prompt 里看见了哪些名字，就该拿到哪一份正文。 */
     int create(const std::string &workdir, int by,
                const std::vector<int> &in,
                const std::vector<int> &out, std::string &err,
-               const std::string &persona = {});
+               const std::string &def_body = {});
 
     /* 投一条消息进目标 agent 的收件箱。没有 to 这个 agent 返回 false。 */
     bool post(int to, const std::string &text);

@@ -200,9 +200,10 @@ _Avoid_: `插件`（[[Plugin（插件）]]是装它的那个目录）、`回调`
 不加执行路径。
 
 **core 那段永远在前**（agent id、[[工作目录（Workdir）]]、`stop` 契约）。这不需要额外保证：
-Agent 只有一个类、一个 `build_dialog`，派生出来的走同一条路，拿不到「不带 stop 契约」的 system prompt。
+Agent 只有一个类、一个 `system_prompt()`，派生出来的走同一条路，拿不到「不带 stop 契约」的 system prompt。
 
 `tools` / `model` 两个字段**不收**：工具清单与模型档位不该由一段 markdown 决定。
+`name` 也不收——**名字取文件名**，与 [[Skill（技能）]]取目录名、command 取文件名同一条规则。
 
 **由派生方解析**：它在自己的 system prompt 里看见了哪些名字，就该拿到哪一份正文。
 让被派生方按自己的 workdir 再查一次，会出现「模型看见的名字在那边不存在」。

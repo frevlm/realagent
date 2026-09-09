@@ -1,8 +1,8 @@
 /*
  * skills.cpp — 扫盘、拼提示词
  *
- * frontmatter 的解析在 frontmatter.cpp——skill 与 command 是同一种文件，
- * 解析只写一份。这里只回答一件事：哪些目录里有 skill，它们叫什么。
+ * frontmatter 的解析与出错时那句话在 frontmatter.cpp（`load_md`）——skill、command、
+ * agent 定义是同一种文件，只写一份。这里只回答一件事：哪些目录里有 skill，它们叫什么。
  *
  * **正文一个字都不看**（`with_body=false`）：那是模型的事，core 只要一个 description。
  */
@@ -25,15 +25,10 @@ namespace {
 
 /* 读一份 SKILL.md 的 description。读不出来就报错原文、返回 nullopt，
  * 调用方跳过这一个——skill 是 N 份各自独立的文件，一份坏了不让另一份变得可疑。 */
-std::optional<std::string> read_description(const fs::path &md)
+std::optional<std::string> read_description(const fs::path &md, const PluginRoot &r)
 {
-    std::string err;
-    const std::optional<Frontmatter> fm = read_frontmatter(md, false, err);
-    if (!fm)
-    {
-        fprintf(stderr, "[skill] %s: %s，跳过\n", md.c_str(), err.c_str());
-        return std::nullopt;
-    }
+    const std::optional<Frontmatter> fm = load_md(md, r, "skill", false);
+    if (!fm) return std::nullopt;
     const auto it = fm->fields.find("description");
     if (it == fm->fields.end() || it->second.empty())
     {
@@ -57,7 +52,7 @@ void scan_dir(const PluginRoot &r, std::vector<Skill> &out)
         if (!e.is_directory(ec)) continue;
         const fs::path md = e.path() / "SKILL.md";
         if (!fs::is_regular_file(md, ec)) continue; // 目录里没有 SKILL.md：它就不是 skill
-        const std::optional<std::string> desc = read_description(md);
+        const std::optional<std::string> desc = read_description(md, r);
         if (!desc) continue;
         Skill s{r.qualify(e.path().filename().string()), *desc, fs::absolute(md, ec).string()};
         const auto it = std::find_if(out.begin(), out.end(),

@@ -11,7 +11,7 @@
  * （同 command 那三样、同 ADR-0023「core 只取三样，其余自己写」）。
  *
  * **core 那段永远在前**（agent id / workdir / stop 契约）。这不需要额外保证：
- * Agent 只有一个类、一个 build_dialog，派生出来的走同一条路，拿不到「不带 stop 契约」
+ * Agent 只有一个类、一个 `system_prompt()`，派生出来的走同一条路，拿不到「不带 stop 契约」
  * 的 system prompt。
  *
  * 由**派生方**解析：它在 system prompt 里看见了哪些名字，就该拿到哪一份正文。

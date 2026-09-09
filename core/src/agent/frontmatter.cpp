@@ -3,6 +3,8 @@
  */
 #include "agent/frontmatter.hpp"
 
+#include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 
@@ -77,6 +79,42 @@ std::optional<Frontmatter> read_frontmatter(const std::filesystem::path &md, boo
         return std::nullopt;
     }
     return out;
+}
+
+std::vector<std::pair<std::string, std::filesystem::path>>
+md_files(const PluginRoot &r, const std::filesystem::path &dir)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<std::pair<std::string, fs::path>> out;
+    if (!fs::is_directory(dir, ec)) return out;
+    for (const fs::directory_entry &e : fs::directory_iterator(dir, ec))
+        if (e.is_regular_file(ec) && e.path().extension() == ".md")
+            out.emplace_back(r.qualify(e.path().stem().string()), e.path());
+    std::sort(out.begin(), out.end(),
+              [](const auto &a, const auto &b) { return a.second < b.second; });
+    return out;
+}
+
+std::optional<Frontmatter> load_md(const std::filesystem::path &md, const PluginRoot &r,
+                                   const char *tag, bool with_body)
+{
+    std::string err;
+    std::optional<Frontmatter> fm = read_frontmatter(md, with_body, err);
+    if (!fm)
+    {
+        fprintf(stderr, "[%s] %s: %s，跳过\n", tag, md.c_str(), err.c_str());
+        return std::nullopt;
+    }
+    /* 正文里的 ${CLAUDE_PLUGIN_ROOT}：隐式 plugin 那儿没有 plugin root，出现它就是错
+     * （ADR-0024 §4）。with_body 为假时正文是空串，这一步什么都不做。 */
+    if (!expand_plugin_root(fm->body, r.root))
+    {
+        fprintf(stderr, "[%s] %s: 正文里有 %s，它只在 plugin 里有意义，跳过\n", tag, md.c_str(),
+                kPluginRootVar);
+        return std::nullopt;
+    }
+    return fm;
 }
 
 } // namespace realagent

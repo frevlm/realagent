@@ -21,7 +21,7 @@ Agents::~Agents()
 int Agents::create(const std::string &workdir, int by,
                    const std::vector<int> &in,
                    const std::vector<int> &out, std::string &err,
-                   const std::string &persona)
+                   const std::string &def_body)
 {
     err.clear();
     if (workdir.empty())
@@ -37,7 +37,7 @@ int Agents::create(const std::string &workdir, int by,
     }
 
     const int id = ++cnt_;
-    nodes_[id] = std::make_unique<Agent>(ctx_, approval_, workdir, id, this, by > 0, persona);
+    nodes_[id] = std::make_unique<Agent>(ctx_, approval_, workdir, id, this, by > 0, def_body);
     for (int x : in)
     {
         if (x > 0 && x < MAX_SIZE) edges_[x].push_back(id);

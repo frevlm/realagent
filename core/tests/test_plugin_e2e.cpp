@@ -62,7 +62,8 @@ int main()
                                               "  它跨了两行。\n---\n正文\n");
     put(p / "commands" / "commit.md", "---\ndescription: 写 commit\nargument-hint: \"[--amend]\"\n"
                                       "---\n跑 ${CLAUDE_PLUGIN_ROOT}/bin/x $ARGUMENTS\n");
-    put(p / "agents" / "builder.md", "---\nname: builder\ndescription: 只改一两个文件\n"
+    // name 故意与文件名不一致：名字取文件名，与 skill 取目录名、command 取文件名同一条规则
+    put(p / "agents" / "builder.md", "---\nname: something-else\ndescription: 只改一两个文件\n"
                                      "tools: [Read, Edit]\n---\nCaveman. 一个文件最好。\n");
     put(p / "hooks" / "hooks.json",
         R"({"hooks":{"SessionStart":[{"matcher":"startup","hooks":[
@@ -96,7 +97,8 @@ int main()
     printf("== agent 定义 ==\n");
     {
         const auto v = scan_agent_defs(w);
-        CHECK(v.size() == 1 && v[0].name == "demo:builder", "名字带前缀");
+        CHECK(v.size() == 1 && v[0].name == "demo:builder",
+              "名字带前缀，且取的是文件名——frontmatter 里那个 name 不作数");
         CHECK(v[0].body.find("Caveman") != std::string::npos, "正文原样，接在 system prompt 后面");
         CHECK(!agent_defs_prompt(v).empty() && agent_defs_prompt({}).empty(),
               "一个都没有时提示词是空串");
