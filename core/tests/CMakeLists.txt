@@ -29,9 +29,9 @@ add_test(NAME skills COMMAND test_skills)
 # 内置工具 + 权限裁决测试（ADR-0016 真正换掉的那半边：静态工具表 + permission 三值）
 add_executable(test_tools test_tools.cpp
                           ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
-                          ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
+                          ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp
                           ../src/agent/executor.cpp ../src/agent/hooks.cpp
-                          ../src/agent/agents.cpp ../src/agent/agent.cpp ../src/agent/agent_defs.cpp ../src/agent/command.cpp ../src/agent/commands.cpp ../src/agent/session.cpp
+                          ../src/agent/agents.cpp ../src/agent/agent.cpp ../src/agent/verdict.cpp ../src/agent/agent_defs.cpp ../src/agent/command.cpp ../src/agent/commands.cpp ../src/agent/session.cpp
                           ../src/agent/skills.cpp ../src/agent/frontmatter.cpp
                           ../src/mcp/client.cpp ../src/mcp/hub.cpp
                           ../src/llm/llm.cpp
@@ -50,11 +50,11 @@ add_test(NAME tools COMMAND test_tools)
 # agent 的收件箱与线程生命周期（ADR-0019）。端点没配，LLM 调用当场失败——
 # 这里验的是消息进出收件箱，不是模型回了什么，所以不碰网络。
 add_executable(test_agent test_agent.cpp
-  ../src/agent/agent.cpp ../src/agent/agent_defs.cpp ../src/agent/command.cpp ../src/agent/commands.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/hooks.cpp ../src/agent/approval.cpp
+  ../src/agent/agent.cpp ../src/agent/verdict.cpp ../src/agent/agent_defs.cpp ../src/agent/command.cpp ../src/agent/commands.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/hooks.cpp ../src/agent/approval.cpp
   ../src/agent/session.cpp ../src/agent/skills.cpp ../src/agent/frontmatter.cpp ../src/llm/llm.cpp
   ../src/mcp/client.cpp ../src/mcp/hub.cpp
   ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
-  ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp ../src/tools/stop.cpp
+  ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp
   ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
   ../src/llm/upstream/openai_responses.cpp ../src/llm/downstream/anthropic_messages.cpp
   ../src/llm/downstream/openai_chat.cpp ../src/llm/downstream/openai_responses.cpp
@@ -62,6 +62,28 @@ add_executable(test_agent test_agent.cpp
 target_include_directories(test_agent PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(test_agent PRIVATE ${CURL_LIBRARIES})
 add_test(NAME agent COMMAND test_agent)
+
+# 收工判定：抄本怎么裁、解不出来怎么判（ADR-0025）。三个纯函数，不碰网络
+add_executable(test_verdict test_verdict.cpp ../src/agent/verdict.cpp)
+target_include_directories(test_verdict PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+add_test(NAME verdict COMMAND test_verdict)
+
+# 出口那条路，端到端（ADR-0025）：假端点 + 真 agent，验打回、收工、recap、不推正文
+add_executable(test_stop_loop test_stop_loop.cpp
+  ../src/agent/agent.cpp ../src/agent/verdict.cpp ../src/agent/agent_defs.cpp ../src/agent/command.cpp
+  ../src/agent/commands.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp ../src/agent/hooks.cpp
+  ../src/agent/approval.cpp ../src/agent/session.cpp ../src/agent/skills.cpp ../src/agent/frontmatter.cpp
+  ../src/mcp/client.cpp ../src/mcp/hub.cpp
+  ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
+  ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp
+  ../src/llm/llm.cpp
+  ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
+  ../src/llm/upstream/openai_responses.cpp ../src/llm/downstream/anthropic_messages.cpp
+  ../src/llm/downstream/openai_chat.cpp ../src/llm/downstream/openai_responses.cpp
+  ../src/config.cpp ../src/plugin.cpp)
+target_include_directories(test_stop_loop PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_stop_loop PRIVATE ${CURL_LIBRARIES})
+add_test(NAME stop_loop COMMAND test_stop_loop)
 
 # MCP 客户端（ADR-0023）。对手是同目录下的 stub server：官方参考 server 实测是旧纪元的
 # （server/discover 回 -32601），而我们只说 2026-07-28，所以现成的对手一个都用不了。
@@ -82,12 +104,11 @@ add_test(NAME mcp_hub COMMAND test_mcp_hub)
 
 # prompt 命令：扫盘、前缀、内置不可覆盖、$ARGUMENTS（ADR-0024 §7）
 add_executable(test_commands test_commands.cpp ../src/agent/commands.cpp
-               ../src/agent/command.cpp ../src/agent/agent.cpp ../src/agent/agent_defs.cpp ../src/agent/agents.cpp
+               ../src/agent/command.cpp ../src/agent/agent.cpp ../src/agent/verdict.cpp ../src/agent/agent_defs.cpp ../src/agent/agents.cpp
                ../src/agent/executor.cpp ../src/agent/hooks.cpp ../src/agent/approval.cpp ../src/agent/session.cpp
                ../src/agent/skills.cpp ../src/agent/frontmatter.cpp
                ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
                ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp
-               ../src/tools/stop.cpp
                ../src/mcp/client.cpp ../src/mcp/hub.cpp ../src/llm/llm.cpp
                ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
                ../src/llm/upstream/openai_responses.cpp
@@ -107,11 +128,10 @@ add_test(NAME hooks COMMAND test_hooks)
 add_executable(test_plugin_e2e test_plugin_e2e.cpp
                ../src/agent/skills.cpp ../src/agent/commands.cpp ../src/agent/command.cpp
                ../src/agent/agent_defs.cpp ../src/agent/hooks.cpp ../src/agent/frontmatter.cpp
-               ../src/agent/agent.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp
+               ../src/agent/agent.cpp ../src/agent/verdict.cpp ../src/agent/agents.cpp ../src/agent/executor.cpp
                ../src/agent/approval.cpp ../src/agent/session.cpp
                ../src/tools/tools.cpp ../src/tools/read.cpp ../src/tools/edit.cpp
                ../src/tools/bash.cpp ../src/tools/spawn.cpp ../src/tools/send_message.cpp
-               ../src/tools/stop.cpp
                ../src/mcp/client.cpp ../src/mcp/hub.cpp ../src/llm/llm.cpp
                ../src/llm/upstream/anthropic_messages.cpp ../src/llm/upstream/openai_chat.cpp
                ../src/llm/upstream/openai_responses.cpp

@@ -38,7 +38,7 @@ enum class HookEvent {
     UserPromptSubmit, // 从收件箱取出一条 user message 时
     PreToolUse,       // Executor::execute 之前
     PostToolUse,      // Executor::execute 之后（**只在真产出了结果时**）
-    Stop,             // 模型调了 stop，agent_end 之前。只观察，不改控制流
+    Stop,             // 收工判定说这趟到头了，agent_end 之前。只观察，不改控制流
 };
 
 struct HookOutcome {

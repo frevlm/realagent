@@ -254,9 +254,9 @@ int main()
         CHECK(nb != nullptr, "新 agent 在图上");
         const std::string sp = nb ? nb->system_prompt() : std::string();
         CHECK(sp.find("BODY_MARK") != std::string::npos, "那份正文接进了它的 system prompt");
-        CHECK(sp.find("`stop`") != std::string::npos &&
-                  sp.find("`stop`") < sp.find("BODY_MARK"),
-              "core 那段与 stop 契约在它前面——派生出来的走的是同一个 system_prompt()");
+        CHECK(sp.find("autonomous loop") != std::string::npos &&
+                  sp.find("autonomous loop") < sp.find("BODY_MARK"),
+              "core 那段与循环契约在它前面——派生出来的走的是同一个 system_prompt()");
 
         // 不给 agent 参数：与加这个功能之前一个字不差
         const nlohmann::json plain = spawn("");

@@ -18,7 +18,7 @@ Executor::Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string 
 
 const nlohmann::json *Executor::find(const std::string &name) const
 {
-    if (const nlohmann::json *t = find_tool(name)) return t; // 内置那六个
+    if (const nlohmann::json *t = find_tool(name)) return t; // 内置那五个
     return mcp_ ? find_by_name(mcp_->tools, name) : nullptr;
 }
 

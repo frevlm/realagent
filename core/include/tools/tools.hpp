@@ -2,7 +2,7 @@
  * tools.hpp — 内置工具：一张表、按名派发、中止，外加每个工具自己那两件事
  *
  * 一个工具一个文件（src/tools/read.cpp、edit.cpp、bash.cpp、spawn.cpp、
- * send_message.cpp、stop.cpp）：发给 LLM 的那段描述与它的实现住在一起，改了行为忘了改描述
+ * send_message.cpp）：发给 LLM 的那段描述与它的实现住在一起，改了行为忘了改描述
  * 就没有缝可钻。tools.cpp 只剩壳——把这些定义串成表，按名字派发。
  *
  * spawn / send_message 只有定义没有实现：它们要认识 Agents，实现在 Executor 里
@@ -202,10 +202,5 @@ nlohmann::json bash_run(const std::string &call_id, const nlohmann::json &params
 
 nlohmann::json spawn_def();
 nlohmann::json send_message_def();
-
-/* stop 是 agent loop 唯一的出口（见 src/tools/stop.cpp）。结果里多一个 "stop": true，
- * loop 读的是这个字段而不是工具名字。 */
-nlohmann::json stop_def();
-nlohmann::json stop_run();
 
 } // namespace realagent

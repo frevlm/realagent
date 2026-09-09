@@ -76,13 +76,13 @@ data: <json>
 | `thinking_start/update/stop` | signature / delta / 空 | 模型思考过程（DeepSeek v4 reasoning），流式增量与 message_update 同语义 | ✅ |
 | `tool_output` | `{call_id, stream, text}` | 工具边跑边推的输出（stdout 与 stderr 合流，见下） | ✅ |
 | `tool_execution_start/end` | `{name, id}` / `{name, id, status, interrupted}` | 工具生命周期。`interrupted` 为真表示这次是被 `POST /interrupt` 打断的，不是工具自己失败——两者模型的反应完全不同，故分开报 | ✅ |
-| `turn_start/end` | 轮次信息 | Turn 生命周期。**`turn_end` 不是收工信号**：模型不调 `stop` 工具就还有下一个 turn（ADR-0019 §5）。客户端的读秒跨 turn 连续，只认 `agent_end` |
+| `turn_start/end` | 轮次信息 | Turn 生命周期。**`turn_end` 不是收工信号**：主模型没有下一步动作时还要过一道收工判定，判不通过就还有下一个 turn（ADR-0025）。客户端的读秒跨 turn 连续，只认 `agent_end` |
 | `status_update` | 运行态数据 | 状态行数字（开放键集，见下） | ✅ |
 | `statusline` | 状态栏数据 | 会话身份变了就推一帧（见下），与 `GET /statusline` 同一份载荷 | ✅ |
 | `permission_request` | `{id, agent_id, tool, params}` | 审批请求（可靠，卡点）。**不按"当前看着谁"过滤**：审批不属于任何 agent 的视图，它是全局的，客户端不管正在看哪个 agent 都要弹，靠 `agent_id` 说明是谁在问。过滤会让一个没人看的 agent 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**没有客户端订阅推送流时当场拒绝**，不等那 30 秒——agent 没有客户端也照跑，两条合起来就是后台 agent 的每个危险工具都卡 30 秒然后必然被拒，那不是安全策略，是一个装成策略的超时 | ✅ |
 | `interrupted` | 空对象 | `POST /interrupt` 生效——agent 在某个检查点停了。此后本次 run 不再有帧 | ✅ |
 | `agent_start` | 空对象 | 一次「跑」开始：agent 从 idle 醒了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
-| `agent_end` | `{cost}` | 一次「跑」收工，**唯一的收工信号**：模型调了 `stop` 工具，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。`cost` 是本次跑的累计花费 | ✅ |
+| `agent_end` | `{cost, recap}` | 一次「跑」收工，**唯一的收工信号**：收工判定说这趟到头了，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。`cost` 是本次跑的累计花费（含判定那次调用），`recap` 是这一趟的回顾（没配小模型时为空串，ADR-0025） | ✅ |
 
 ### statusline 帧
 

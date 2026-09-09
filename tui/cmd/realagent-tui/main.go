@@ -743,8 +743,8 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.approval = nil
 
 	case "turn_end":
-		// 一个 turn 结束**从来不是**收工：模型不调 `stop` 工具，下一轮接着跑
-		// （ADR-0019 §5）。读秒因此跨 turn 连续，只认 agent_end。
+		// 一个 turn 结束**从来不是**收工：主模型没有下一步动作时还要过一道收工判定，
+		// 判不通过下一轮接着跑（ADR-0025）。读秒因此跨 turn 连续，只认 agent_end。
 		m.closeLine()
 		var d struct {
 			Error string `json:"error"`
@@ -757,7 +757,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		}
 
 	case "agent_end":
-		// 唯一的收工信号。模型打了 `stop`、出错、被中断——四条路最后都到这一帧
+		// 唯一的收工信号。收工判定说这趟到头了、出错、被中断——四条路最后都到这一帧
 		m.closeLine()
 		m.awaiting = false
 		m.busy.stop()

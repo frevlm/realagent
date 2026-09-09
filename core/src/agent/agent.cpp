@@ -143,6 +143,7 @@ struct StreamCtx {
     SseParser parser;     // 协议决定怎么解，一次调用一个实例
     LlmOutcome *out;
     std::string model;         // 本次调用的模型名（计价按它查单价）
+    bool silent = false;       // 正文不往客户端推（收工判定那次，见 Agent::judge）
     bool parse_failed = false; // 解析报错：与用户中断区分开
     long status = 0;           // 首次拿到响应体时问一次 HTTP 状态码
     std::string error_body;    // 状态码不是 2xx 时，响应体不是流，攒起来给人看
@@ -171,7 +172,7 @@ static size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata
     }
 
     const bool ok = s->parser.feed(std::string_view(ptr, n), [s](std::string_view t, const nlohmann::json &ev) {
-        s->self->on_llm_event(t, ev, *s->out, s->model);
+        s->self->on_llm_event(t, ev, *s->out, s->model, s->silent);
     });
     // 解析失败：立刻中止传输。继续读下去只会攒出一个"成功但空"的回答，
     // 那比报错更糟——用户看不出发生了什么。（返回 < n 即令 curl 报 CURLE_WRITE_ERROR）
@@ -184,26 +185,28 @@ static size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata
 }
 
 void Agent::on_llm_event(std::string_view type, const nlohmann::json &ev, LlmOutcome &out,
-                         const std::string &model)
+                         const std::string &model, bool silent)
 {
+    /* silent 只挡正文与思考，不挡钱：那次调用的产出是给裁判自己看的，推给客户端就是
+     * 凭空多出来的一段助手发言；而它花掉的钱是真花掉了（ADR-0025）。 */
     if (type == "message_update")
     {
         out.text += ev["delta"].get<std::string>();
-        broadcast("message_update", ev); // 实时增量 → TUI 打字效果
+        if (!silent) broadcast("message_update", ev); // 实时增量 → TUI 打字效果
     }
     else if (type == "thinking_start")
     {
         out.thinking_signature = ev["signature"];
-        broadcast("thinking_start", ev);
+        if (!silent) broadcast("thinking_start", ev);
     }
     else if (type == "thinking_update")
     {
         out.thinking += ev["delta"].get<std::string>();
-        broadcast("thinking_update", ev);
+        if (!silent) broadcast("thinking_update", ev);
     }
     else if (type == "thinking_stop")
     {
-        broadcast("thinking_stop", ev);
+        if (!silent) broadcast("thinking_stop", ev);
     }
     else if (type == "usage")
     {
@@ -232,7 +235,7 @@ void Agent::on_llm_event(std::string_view type, const nlohmann::json &ev, LlmOut
     }
 }
 
-bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out)
+bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out, bool silent)
 {
     /* 端点那一束没配齐就别往下走（ADR-0017）。
      *
@@ -262,7 +265,8 @@ bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out)
                 .curl = curl,
                 .parser = SseParser(*protocol_from(ctx_.config->get("protocol"))),
                 .out = &out,
-                .model = dialog.value("model", std::string())};
+                .model = dialog.value("model", std::string()),
+                .silent = silent};
     curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
@@ -306,13 +310,11 @@ bool Agent::llm_call(const nlohmann::json &dialog, LlmOutcome &out)
 
 std::string Agent::system_prompt() const
 {
-    // stop 的契约必须写在这儿。模型不知道有这个出口就不会调它
+    /* 循环契约写在这儿：模型要知道「没有下一步动作」怎么表达（什么都不调），
+     * 也要知道那不等于收工——收工归裁判判（ADR-0025）。它没有出口工具可调。 */
     return "You are a helpful coding agent. Your agent id is " + std::to_string(id_) +
            ". Your working directory is " + workdir_ + ".\n"
-                                                       "You run in an autonomous loop: calling `stop` is the only way to end your run. Whenever you finish answering a question or completing a task, output your response and call `stop` in the same turn. Do not invent tasks the user did not request.\n\n"
-                                                       "Example:\n"
-                                                       "User: Explain this function.\n"
-                                                       "Assistant: [Explains the function] + tool_call: stop()" +
+                                                       "You run in an autonomous loop: keep calling tools until the user's request is fully handled. When you have no next action left, write your final answer and call no tools. A supervisor then checks whether the run is really finished and hands it back to you if it is not. Do not invent tasks the user did not request." +
            // skill 清单（ADR-0022）。一个都没有时这里是空串——system prompt 与加这个功能之前一个字不差
            skills_prompt(skills_) +
            // 可以拿去 spawn 的 agent 定义（ADR-0024 §8）。同上，一个都没有就是空串
@@ -351,9 +353,18 @@ void Agent::session_start_hook(const std::string &source)
     session_context_ = hooks_.run(HookEvent::SessionStart, p, &abort_).inject;
 }
 
-/* 模型回了话却没调工具。提醒它完成即 stop，同时防止其臆想新任务乱执行 */
-static constexpr const char *kStopReminder =
-    "You replied without calling any tools. If you have finished the user's request, call `stop` now. Do not invent new tasks.";
+/* 裁判打回时递给主模型的那条话头。**开头那个标记不是装饰**：它记进历史也是一条 user
+ * 消息，下一次判定要认得出这句话是裁判说的、不是用户说的（verdict.hpp）。 */
+static std::string kickback(const std::string &reason)
+{
+    return std::string(kSupervisorTag) +
+           (reason.empty() ? "This run is not finished yet." : reason) +
+           " Keep working on it. Do not start tasks the user did not request.";
+}
+
+/* 连着几次「打回、主模型又一个工具都没调」就强制收工。一个工具都没跑就说明这一趟
+ * 推不动了，再问下去只是两个模型互相说话花钱。 */
+static constexpr int kMaxStall = 3;
 
 /* —— idle ⇄ 运行中那条边沿。busy 就是「在不在一趟中间」，在这两处上锁、解锁 —— */
 
@@ -361,7 +372,10 @@ void Agent::start_run(std::unique_lock<std::mutex> &busy)
 {
     busy.lock(); // 见 try_lock()：事件循环线程拿不到就回一句"忙着呢"，不排队等
     running_.store(true);
-    ensure_loaded(); // idle 期间历史还给了盘，先读回来
+    ensure_loaded();               // idle 期间历史还给了盘，先读回来
+    run_begin_ = messages_.size(); // 收工判定的抄本从这里往后取：判的是这一趟
+    recap_.clear();
+    stall_ = 0;
     abort_.store(false);
     exe_.reset(); // 中止痕迹与 abort_ 同一个生命周期，一起清
     run_cost_ = 0;
@@ -372,9 +386,11 @@ void Agent::start_run(std::unique_lock<std::mutex> &busy)
 
 void Agent::finish_run(std::unique_lock<std::mutex> &busy)
 {
-    broadcast("agent_end", nlohmann::json{{"cost", run_cost_}});
+    broadcast("agent_end", nlohmann::json{{"cost", run_cost_}, {"recap", recap_}});
     running_.store(false);
-    const std::string summary = last_text(); // 通知带的正文，要在丢历史之前取
+    /* 通知带的正文，要在丢历史之前取。有 recap 就用 recap——邻居要的是「这一趟干了
+     * 什么」，最后一条正文常常只是一句「好了」（ADR-0025）。没有裁判时退回正文。 */
+    const std::string summary = recap_.empty() ? last_text() : recap_;
     {
         // 收件箱空了就把历史还给盘（ADR-0019 §7）。判据只有一条：**内存里那份是不是
         // 副本**。是副本就能丢，醒来重读一遍——走的就是 ensure_loaded()。立刻丢，不设
@@ -470,11 +486,10 @@ void Agent::record_assistant(const LlmOutcome &out)
     record(am);
 }
 
-/* 顺序执行这一批工具，每条结果即时入账。返回：模型打了 stop 没有。
+/* 顺序执行这一批工具，每条结果即时入账。
  * 中断不由返回值表达——abort_ 调用方自己看得见。 */
-bool Agent::run_tools(const LlmOutcome &out)
+void Agent::run_tools(const LlmOutcome &out)
 {
-    bool stopped = false;
     size_t executed = 0;
     for (const auto &tu : out.tool_uses)
     {
@@ -486,18 +501,6 @@ bool Agent::run_tools(const LlmOutcome &out)
         const bool is_error = r["isError"];
         const bool interrupted = r["interrupted"];
         nlohmann::json content = r["content"];
-        // 认字段不认名字：哪个工具能收工是工具自己说的，loop 不抄一份工具表
-        if (r.value("stop", false))
-        {
-            stopped = true;
-            /* Stop（ADR-0024 §6）。**只观察，不改控制流**——出口仍然只有一个，
-             * 这个出口只是多了一个旁观者。 */
-            if (!hooks_.empty())
-            {
-                nlohmann::json p{{"agent_id", id_}, {"cwd", workdir_}};
-                hooks_.run(HookEvent::Stop, p, &abort_);
-            }
-        }
         /* 帧里的 status 是协议契约（PROTOCOL.md），保持 int：0 或 1。
          * bash 的退出码从此不进这个帧——TUI 一直只判 != 0，行为一个字不变。 */
         broadcast("tool_execution_end", nlohmann::json{{"name", tu.name},
@@ -527,7 +530,45 @@ bool Agent::run_tools(const LlmOutcome &out)
                                                                                 {"content", nlohmann::json::array({{{"type", "text"}, {"text", "interrupted by user"}}})},
                                                                                 {"is_error", true}}})}});
     }
-    return stopped;
+}
+
+/* 收工判定（ADR-0025）：主模型这一轮一个工具都没调时问一次小模型。
+ *
+ * 交给它的不是整段历史，是**这一趟的抄本**（run_transcript）：user 消息一条不丢，
+ * 其余按行截断、超预算从旧到新丢。裁判要的是「用户要什么、干了什么」，不是全文。
+ *
+ * 请求里不带工具（dialog 没有 `tools` 这个键）：裁判只说话，不干活。
+ * 正文也不往客户端推（silent）——那段字是给它自己看的。 */
+StopVerdict Agent::judge()
+{
+    StopVerdict v; // 默认就是收工：下面每一条失败路径都落回这里
+    const std::string model = ctx_.config->model(ModelTier::Small);
+    // 没配小模型就是没有裁判。**不回落到主模型**（ADR-0010）：那会让「我配了小模型」
+    // 与「我没配」长得一模一样，出账单时才发现区别。行为退回没有这个功能之前——
+    // 模型不调工具就算干完了
+    if (model.empty()) return v;
+
+    nlohmann::json msg;
+    msg["role"] = "user";
+    msg["content"] = nlohmann::json::array(
+        {nlohmann::json{{"type", "text"},
+                        {"text", stop_verdict_prompt(run_transcript(messages_, run_begin_))}}});
+    nlohmann::json d;
+    d["model"] = model;
+    d["system"] = stop_verdict_system();
+    d["messages"] = nlohmann::json::array({msg});
+
+    LlmOutcome out;
+    const bool ok = llm_call(d, out, /*silent=*/true);
+    run_cost_ += out.cost; // 花掉了就是花掉了，算进这一趟的账
+    if (!ok)
+    {
+        // 判不出来就收工。用户此刻已经看见主模型的回答了，这一趟对他而言是好的；
+        // 把他扣在循环里花钱才是坏的
+        fprintf(stderr, "[agent] 收工判定失败，按收工处理：%s\n", out.error.c_str());
+        return v;
+    }
+    return parse_stop_verdict(out.text);
 }
 
 /* agent 主循环。**一层循环，一圈一个 turn**——turn 是这里唯一的重复单位。
@@ -535,14 +576,16 @@ bool Agent::run_tools(const LlmOutcome &out)
  * 一圈开头等的是「有活干」，两种：pending（上一圈没收工），或者收件箱里有东西。两种都
  * 没有就阻塞——那就是 idle（ADR-0019），不需要「空闲」这个状态。
  *
- * 一趟怎么结束：**模型调 stop 工具**，或者出错/被中断。「这次没调工具」不算收工——
- * 那只是它一句话说完了，不代表活干完了（stop.cpp）。
+ * 一趟怎么结束：**主模型没有下一步动作、且裁判判它干完了**，或者出错/被中断。
+ * 「这次没调工具」本身不算收工——那只是它一句话说完了，不代表活干完了；干没干完
+ * 由小模型看着这一趟的抄本判（judge()，ADR-0025）。
  *
  * 「一趟」（agent_start 到 agent_end、通知邻居、把历史还给盘）不是第二层循环，是
  * idle ⇄ busy 那条边沿：`busy.owns_lock()` 就是「此刻在一趟中间」，不另存状态位。
  *
  * 不设轮数上限：一个数字定不出"多少轮算跑飞了"——改个错字一圈，重构一个模块几十圈，
- * 两者都正常。刹车是下面那三处 continue：用户中断、llm_call 失败、端点空回答。 */
+ * 两者都正常。刹车是下面那三处 continue：用户中断、llm_call 失败、端点空回答，
+ * 外加 kMaxStall——那一条数的不是轮数，是**连着几轮一个工具都没跑**。 */
 void Agent::loop()
 {
     bool pending = false; // 还有活干：别等新消息，直接跑下一圈
@@ -573,7 +616,7 @@ void Agent::loop()
 
         broadcast("turn_start", nlohmann::json::object());
         LlmOutcome out;
-        // 对话主链路走主模型；小模型档留给后续杂活调用点（标题/摘要）
+        // 对话主链路走主模型。小模型只在出口上出现一次：judge()（ADR-0025）
         if (!llm_call(build_dialog(ModelTier::Main), out))
         {
             if (!abort_.load())
@@ -605,19 +648,42 @@ void Agent::loop()
         if (out.tool_uses.empty())
         {
             broadcast("turn_end", nlohmann::json{{"stop_reason", out.stop_reason}});
-            record_user(kStopReminder); // 没调工具：提醒完成即调用 stop，切勿臆想新任务
-            pending = true;
-            continue;
+            /* 主模型没有下一步动作了。**收工与否不归它判**——问裁判（ADR-0025）。
+             * 判定本身要打一次 LLM 调用，期间用户照样能中断。 */
+            const StopVerdict v = judge();
+            if (abort_.load())
+            {
+                broadcast("interrupted", nlohmann::json::object());
+                continue;
+            }
+            if (!v.done && ++stall_ < kMaxStall)
+            {
+                record_user(kickback(v.reason)); // 打回：接着干
+                pending = true;
+                continue;
+            }
+            if (!v.done)
+                fprintf(stderr, "[agent] 连着 %d 轮没跑一个工具，强制收工\n", kMaxStall);
+            recap_ = v.recap;
+            /* Stop（ADR-0024 §6）。**只观察，不改控制流**——出口仍然只有一个，
+             * 这个出口只是多了一个旁观者。 */
+            if (!hooks_.empty())
+            {
+                nlohmann::json p{{"agent_id", id_}, {"cwd", workdir_}};
+                hooks_.run(HookEvent::Stop, p, &abort_);
+            }
+            continue; // pending 还是 false：这一圈就是最后一圈
         }
 
-        const bool stopped = run_tools(out);
+        run_tools(out);
         if (abort_.load())
         {
             broadcast("interrupted", nlohmann::json::object());
             continue;
         }
         broadcast("turn_end", nlohmann::json{{"tool_uses", (int)out.tool_uses.size()}});
-        pending = !stopped;
+        stall_ = 0; // 跑过工具 = 真的有进展
+        pending = true;
     }
 }
 

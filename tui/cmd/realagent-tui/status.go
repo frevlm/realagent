@@ -18,7 +18,7 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 // activity 是"模型正在干活"的唯一状态源。
 // start 跨 turn 连续（工具执行 → 下一轮 LLM 调用是同一次等待，读秒不重置），
-// 直到 agent_end 收工才停——turn 结束不是收工，模型不调 `stop` 就还有下一轮。
+// 直到 agent_end 收工才停——turn 结束不是收工，收工判定不通过就还有下一轮。
 type activity struct {
 	active bool
 	verb   string    // 当前动作：思考中 / 生成回复 / 执行工具 bash / 等待审批

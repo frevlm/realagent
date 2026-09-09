@@ -137,16 +137,16 @@ int main()
     {
         // 一个工具一个文件，read/edit/bash 自带实现，spawn/send_message 由 Executor 实现——
         // 定义都在同一张表里，LLM 看见的清单只有一份（ADR-0019）
-        CHECK(tool_defs().size() == 6, "六个工具");
+        CHECK(tool_defs().size() == 5, "五个工具");
         CHECK(find_tool("spawn") && find_tool("send_message"), "两个 agent 级工具在同一张表里");
         const nlohmann::json *r = find_tool("read");
         const nlohmann::json *e = find_tool("edit");
         const nlohmann::json *b = find_tool("bash");
-        const nlohmann::json *s = find_tool("stop");
         CHECK(r && !tool_dangerous(*r), "read 是只读工具，不触发权限检查点");
         CHECK(e && tool_dangerous(*e), "edit 危险");
         CHECK(b && tool_dangerous(*b), "bash 危险");
-        CHECK(s && !tool_dangerous(*s), "stop 是非危险控制工具");
+        // 出口不再是一个工具：收工归小模型判（ADR-0025），模型的清单里没有 stop
+        CHECK(find_tool("stop") == nullptr, "没有 stop 工具");
         // 定义就是端点要的那个对象，外加一个 core 私有的键（ADR-0023 §2）
         CHECK(r && r->contains("input_schema") && (*r)["input_schema"].is_object(),
               "schema 是对象，不是待 parse 的字符串");
@@ -155,9 +155,6 @@ int main()
         CHECK(find_tool("core-tools_bash") == nullptr,
               "没有命名空间前缀这回事了（ADR-0016）");
         CHECK(st(call("nope", "{}")) != 0, "未知工具返回错误，不是空成功");
-        const auto stop_res = call("stop", "{}");
-        CHECK(st(stop_res) == 0 && stop_res.value("stop", false) == true,
-              "stop 工具执行返回 stop=true 标记");
     }
 
     printf("== read ==\n");

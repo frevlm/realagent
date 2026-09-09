@@ -25,6 +25,7 @@
 #include "agent/hooks.hpp"
 #include "agent/session.hpp"
 #include "agent/skills.hpp"
+#include "agent/verdict.hpp"
 #include "json.hpp"
 #include "llm/llm.hpp"
 #include "mcp/mcp.hpp"
@@ -88,7 +89,7 @@ class Agent {
     const std::string &workdir() const { return workdir_; }
 
     /* 这个 agent 的 system prompt。**只有这一处拼**（`build_dialog` 也是问它要的）：
-     * core 那段与 `stop` 契约永远在前，skill 清单、agent 定义清单、派生方交下来的
+     * core 那段与循环契约永远在前，skill 清单、agent 定义清单、派生方交下来的
      * 那份正文、SessionStart 注入的那段依次接在后面。 */
     std::string system_prompt() const;
 
@@ -131,16 +132,29 @@ class Agent {
     const std::string &session_id() const { return session_.id(); }
 
     /* SseParser 产出的事件落在这里：累积进 out，该实时广播的顺手广播。
-     * public 只因为 libcurl 的写回调是个自由函数，进不来私有区。 */
+     * public 只因为 libcurl 的写回调是个自由函数，进不来私有区。
+     *
+     * silent = 这次调用的正文不广播（收工判定那次，见 judge()）：那段文字是给裁判
+     * 自己看的，推给客户端就成了凭空多出来的一段助手发言。**钱照报**——花掉了就是
+     * 花掉了，`usage` 与 `status_update` 不受 silent 影响。 */
     void on_llm_event(std::string_view type, const nlohmann::json &ev, LlmOutcome &out,
-                      const std::string &model);
+                      const std::string &model, bool silent);
 
   private:
     /* agent 主循环，整条线程从头到尾就在这里面。**一层循环，一圈一个 turn**：
      * 等到有活干（上一圈没收工，或收件箱非空）→ 把攒着的消息全收进来 → 调 LLM →
-     * 执行工具 → 模型调了 `stop` 才收工，回去等。
+     * 执行工具；主模型这一轮一个工具都没调时问一次裁判（judge()），它说干完了才收工。
      * 两样都没有就阻塞——那就是 idle（ADR-0019），不需要「空闲」这个状态。 */
     void loop();
+
+    /* 收工判定（ADR-0025）：把这一趟的抄本交给小模型，它说这趟到头了没有，
+     * 顺带写一份 recap。**只在主模型这一轮没调任何工具时问**——有工具要跑就说明
+     * 它还有下一步动作，没什么可判的。
+     *
+     * 小模型没配（`small_model` 为空）就没有裁判：退回「没调工具就算干完了」，
+     * recap 为空。判定本身失败（端点报错、解不出）同样判收工——判不出来不该把人
+     * 扣在循环里花钱。 */
+    StopVerdict judge();
 
     /* idle ⇄ 运行中那条边沿。「一趟」不是第二层循环，就是这两个函数之间那段；
      * busy（run_mtx_）的持有与否即「在不在一趟中间」，不另存状态位。 */
@@ -154,9 +168,9 @@ class Agent {
     void record_user(const std::string &text);
     /* 一次 LLM 产出入账（thinking + 正文 + tool_use，块序由协议定） */
     void record_assistant(const LlmOutcome &out);
-    /* 顺序执行这一批工具，结果逐条入账。返回：模型打了 `stop` 没有。
+    /* 顺序执行这一批工具，结果逐条入账。
      * 中断不由返回值表达——abort_ 调用方自己看得见。 */
-    bool run_tools(const LlmOutcome &out);
+    void run_tools(const LlmOutcome &out);
 
     /* idle 时历史还给了盘，醒来先读回来。读不到 = 这个会话还没写过盘，
      * 空历史就是对的，不是错。 */
@@ -169,8 +183,9 @@ class Agent {
 
     /* 构建抽象对话（system/messages/tools），tier 决定 dialog["model"] 取哪一档 */
     nlohmann::json build_dialog(ModelTier tier) const;
-    /* 一次 LLM 调用：build_request → libcurl → SseParser → LlmOutcome */
-    bool llm_call(const nlohmann::json &dialog, LlmOutcome &out);
+    /* 一次 LLM 调用：build_request → libcurl → SseParser → LlmOutcome。
+     * silent 见 on_llm_event()——收工判定那次不往客户端推正文。 */
+    bool llm_call(const nlohmann::json &dialog, LlmOutcome &out, bool silent = false);
     /* 最后一条 assistant 消息的正文（完成通知带的就是它） */
     std::string last_text() const;
     /* 广播事件（走 CoreContext::emit_fn） */
@@ -218,6 +233,16 @@ class Agent {
     std::string session_context_;
     /* 派生它的那个 agent 交下来的那份 agent 定义正文。空 = 没指定。 */
     std::string def_body_;
+    /* 这一趟开跑时历史有多长。收工判定的抄本从这里往后取——判的是这一趟，
+     * 不是这个会话的一生（ADR-0025）。 */
+    size_t run_begin_ = 0;
+    /* 这一趟的 recap（裁判写的）。完成通知与 `agent_end` 帧带的就是它；
+     * 没有裁判时是空串，那时完成通知退回最后一条 assistant 正文。 */
+    std::string recap_;
+    /* 连着几次「裁判打回、主模型又一个工具都没调」。三次就强制收工：一个工具都没跑
+     * 就说明这一趟推不动了，再问下去只是两个模型互相说话花钱（ADR-0025）。
+     * 跑过工具就清零——那是真的有进展。 */
+    int stall_ = 0;
     double run_cost_ = 0; // 本次 run 累计花费（USD），一次用户输入起算清零
     std::atomic<bool> abort_{false};
 

@@ -35,10 +35,10 @@ add_library(realagent_core_lib STATIC
   src/tools/bash.cpp
   src/tools/spawn.cpp
   src/tools/send_message.cpp
-  src/tools/stop.cpp
   src/agent/executor.cpp
   src/agent/approval.cpp
   src/agent/agent.cpp
+  src/agent/verdict.cpp
   src/agent/agents.cpp
   src/agent/command.cpp
   src/agent/session.cpp

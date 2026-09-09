@@ -82,7 +82,7 @@ func TestStatusVerbFromEvents(t *testing.T) {
 	}
 }
 
-// turn_end 从来不收工（模型不打 stop 就还有下一轮），agent_end 才停。
+// turn_end 从来不收工（收工判定不通过就还有下一轮），agent_end 才停。
 func TestStatusStopsOnAgentEnd(t *testing.T) {
 	m := testModel()
 	feedEvents(&m,
@@ -94,7 +94,7 @@ func TestStatusStopsOnAgentEnd(t *testing.T) {
 	}
 	feedEvents(&m, client.Event{Type: "turn_end", Payload: `{"stop_reason":"end_turn"}`})
 	if !m.busy.active {
-		t.Error("模型没打 stop，turn_end 也不该停止读秒")
+		t.Error("没过收工判定，turn_end 也不该停止读秒")
 	}
 	feedEvents(&m, client.Event{Type: "agent_end", Payload: `{"cost":0.01}`})
 	if m.busy.active {
