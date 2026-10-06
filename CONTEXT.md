@@ -563,6 +563,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 日志：spdlog（第三方依赖）。
 - core 第三方依赖：libcurl + spdlog 两个（FTXUI 属 TUI 层）。
   - 实况注（2026-08-28）：需要 find_package 的是**三个**——libcurl、spdlog、quiche（`core/CMakeLists.txt`）。JSON 是 nlohmann/json 3.12.0，单头文件 vendored 在 `core/include/json.hpp`，不必安装、不必链库。括号里的 FTXUI 是 ADR-0007 之前"TUI 也用 C++"方案的残留，本项目**没有也不会**依赖它（TUI 是 Go + Bubble Tea）。
+  - 实况注（2026-10-06）：spdlog 从未被任何源文件使用（日志一直是 `fprintf(stderr, ...)`），已从 `core/CMakeLists.txt` 删除。core 的第三方依赖现在是 **libcurl + quiche** 两个。
 - TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，**有状态栏**（见 [[Statusline（状态栏）]]）。原定"无状态栏"，后反转并已完整实现（core 侧 `GET /statusline` + `statusline` 帧，TUI 侧 `tui/cmd/realagent-tui/statusline.go`）。ADR-0007 正文第 34 行仍写着"无状态栏（用户明确）"，紧跟其后的实况注（2026-08-16）已注明该条被推翻——**正文与注不一致是有意保留的**：ADR 记录的是当时怎么想的，注记录的是后来发生了什么。
 - TUI 渲染：~~历史归终端管，不进 altscreen（ADR-0008）~~ —— **已推翻**（[[ADR-0020]]，2026-08-28）。进 altscreen + 自建 viewport；**不开 mouse mode**（开了终端原生选中/复制会整个失效，bubbletea issue #162），滚动绑键盘、滚轮靠终端的 alternate scroll 转方向键。行不常驻内存，从会话记录读、动态渲染，改宽可重排。新增 `GET /session`（兼容 `GET /history`），**返回事件帧序列**（不是抽象对话消息）——TUI 复用同一个渲染器，不写第二份。
   - 接缝在「最后一条已落盘的消息」：历史走端点，正在流的走事件帧。subagent 的历史同样读得到（它落在 `sessions/sub/`，只是不进会话清单）。

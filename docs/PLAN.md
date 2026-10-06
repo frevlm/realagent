@@ -1,7 +1,7 @@
 # 实现规划（Phase 1）
 
 > 里程碑拆解 + 技术风险清单 + 调研发现。规划中发现的问题在此暴露，逐项拷问后回填。
-> 架构决策见 CONTEXT.md 与 docs/adr/（0001-0016）。
+> 架构决策见 CONTEXT.md 与 docs/adr/（0001-0016；实况注：现已到 0025）。
 >
 > **实况注（2026-08-25）：M1「插件加载链」整条已作废**（[[ADR-0016]]）。插件系统于本日废除，
 > 5 个容器并入 core。M2 / M4 里凡以"插件"为形态的交付物，交付的能力都还在，只是不再隔着
@@ -132,6 +132,7 @@ M6 TUI              → M7 集成与测试
     - **不具备该能力 = 不可中断**，core 照实等它跑完，不假装成功。这一条是刻意的：假报成功会让上层以为后台已经干净。
     - 「算不算被中断」由 core 判（是 core 提的），结果经 `tool_execution_end` 的 `interrupted` 字段与 `tool_result` 的 `[interrupted by user]` 一并交代——模型对"被打断"与"命令失败"的反应完全不同。
     - 端到端实测：bash 死循环执行中 `POST /interrupt` → 子进程组被收、`status=143`、`interrupted=true`、`interrupted` 帧到达，无孤儿进程残留。
+    - 实况注（2026-10-06）：「一个 pid 就记得住」在多 agent 之后不成立——各 agent 的线程会同时跑 bash，全局 pid 互相覆盖，中断 A 可能杀掉 B 的命令。现已改为每个 Executor 一个中断标志，bash 与 hook 共用 `core/src/proc.cpp` 的 `run_proc`（pid 是局部的，轮询标志后 SIGTERM，1 秒后 SIGKILL）。`interrupt_tool()` 与全局 pid 已删除；`test_tools` 里有一条两个 agent 并发跑 bash、只中断其一的用例。
 - **R9: JSONL 会话 schema**
   - 决策：已定（2026-08-09）——append-only，一行一条，call_id 关联工具调用与结果。
     **落地时改了 schema 形状**（2026-08-16）：原记「类型区分 user/assistant/tool_call/tool_result + 外层信封（id/ts/content/model）」，实际存的是**抽象对话里的那一条消息，原样**（`{"role":..., "content":[...]}`）。
@@ -184,6 +185,7 @@ M6 TUI              → M7 集成与测试
 **交付物**
 - QUIC/HTTP3 server（core）+ quic-go client（TUI）。**实际选用 Cloudflare quiche**（core/CMakeLists.txt:17-19，`quiche_h3_*` API 贯穿 core/src/server/quic_server.cpp），不是本文与 ADR-0006 原写的 ngtcp2 + nghttp3；此换库无 ADR 记录。
 - HTTP/3 REST 端点：以 docs/PROTOCOL.md 的端点表为准（那张表逐行标了实现状态）。首版实到 9 个路由（core/src/server/quic_server.cpp:271-330）；`POST /command`、`GET /sessions`、`POST /session` 至今未实现，会话管理走 `POST /message` 的斜杠命令。
+  - 实况注（2026-10-06）：上一句已过时——这三个端点都在。server 的分发现在是一张路由表（`QuicServer::route`，注册全在 `core/src/main.cpp`），以 PROTOCOL.md 与 main.cpp 为准，本文不再记行号。
 - 推送流（GET /events 长生命周期单向流，SSE 语义，全可靠）
 
 **技术要点**
@@ -243,12 +245,12 @@ M6 TUI              → M7 集成与测试
 |---|---|---|---|
 | R1 | Clang C++26 协程支持度 | ✅ 已解除（C++20 协程核心足够） | — 无实现物；附注：core 至今零协程 |
 | R2 | msquic 集成 | ✅ 已废弃 | — 无实现物；替代品实为 quiche，非 ngtcp2（见 R12） |
-| R3 | 插件事件订阅接口 | ✅ 已定（单入口分发） | ✅ 已实现（`event.observe`，loader.cpp:491 扇出） |
+| R3 | 插件事件订阅接口 | ✅ 已定（单入口分发） | ✅ 曾实现（`event.observe`）；2026-08-25 随 ADR-0016 删除，loader.cpp 已不存在 |
 | R4 | 嵌套组装时机 | ✅ 已定 | ✅ 已实施（2026-08-10）：反图 BFS 逐层 init + `import`/`providers` 依赖注入（ADR-0012） |
-| R5 | edit +x-0 的 LLM 描述 | ✅ 已定（创建语义进描述） | ✅ 已实现（core-tools/core_tools.c:197 描述 + :127 追加分支） |
+| R5 | edit +x-0 的 LLM 描述 | ✅ 已定（创建语义进描述） | ✅ 已实现（现在 core/src/tools/edit.cpp；core_tools.c 随 ADR-0016 删除） |
 | R6 | bash 流式输出 | ✅ 已定（tool_output 帧走推送流） | ✅ 已实现（2026-08-16）：容器 emit + TUI 续行渲染，端到端实测 |
 | R7 | 事件流实现形态 | ✅ 已定（while(1) + fan-out） | ✅ 已实现（agent.cpp 的 `Agent::run`） |
-| R8 | 中止传播模型 | ✅ 已定（LLM + 工具统一信号） | ✅ 已实现（2026-08-16）：LLM 侧 + 工具侧 `tool.interrupt`（打进程组），端到端实测 |
+| R8 | 中止传播模型 | ✅ 已定（LLM + 工具统一信号） | ✅ 已实现（2026-08-16）；2026-10-06 改为每 agent 一个中断标志，修掉多 agent 下的全局 pid 串扰 |
 | R9 | JSONL 会话 schema | ✅ 已定；**落地时改为同形存储**（2026-08-16，理由见 M3 风险节） | ✅ 已实现（2026-08-16）：`Session` + `/new` `/resume` + `GET /sessions` `POST /session`，端到端实测 |
 | R10 | DeepSeek 协议差异 | ✅ 已解除（工具调用 + 流式全支持） | — 无实现物（调研结论） |
 | R11 | 流式解析 → message_update 对接 | ✅ 已定 | ✅ 已完成（2026-08-10）：thinking 三帧 + message_update + tool_use 打通 |
