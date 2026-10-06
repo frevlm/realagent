@@ -1,12 +1,8 @@
-// realagent-tui — 终端客户端（M6 基本功能 + ADR-0005 审批对话框）
+// realagent-tui — 终端客户端（Bubble Tea，alternate screen，ADR-0020）
 //
-// Bubble Tea 界面：消息流 + 底部输入框 + 状态栏（参考 claude code / codex）。
-// 订阅 /events 推送流渲染流式打字效果；POST /message 提交用户消息（立即返回
-// {"status":"processing"}，回复与审批事件均走推送流）。
-//
-// 屏幕整块归 TUI（alternate screen，ADR-0020）：历史进 viewport（可滚），
-// 底下是审批框 + 子面板 + 斜杠菜单 + 读秒状态行 + 输入框 + 状态栏。历史不在
-// 内存里存渲染后的行——切 agent 就丢掉、从 GET /history 重新读一遍。
+// POST /message 提交消息，回复与审批都走 /events 推送流。屏幕：历史进 viewport（可滚），
+// 底下是审批框 + 子面板 + 斜杠菜单 + 读秒行 + 输入框 + 状态栏。
+// 只留当前 agent 的行流；切 agent 就丢掉、从 GET /session 重新读。
 package main
 
 import (
@@ -53,8 +49,7 @@ func waitEventCmd(ch <-chan client.Event) tea.Cmd {
 	}
 }
 
-// 拉取斜杠命令列表（启动时一次；失败静默降级为无菜单，不影响其余功能）。
-// 带上 agentID：plugin 来的命令跟着那个 agent 的工作目录走（ADR-0024）。
+// 拉取斜杠命令列表（失败就没有菜单）。plugin 命令跟着 agent 的工作目录走。
 func fetchCommandsCmd(c *client.Client, agentID int) tea.Cmd {
 	return func() tea.Msg {
 		cmds, err := c.FetchCommands(agentID)
@@ -76,15 +71,11 @@ const menuMaxRows = 8
 
 type model struct {
 	client *client.Client
-	// 当前这个 agent 的行流（原始文本，不含 ANSI）。m.open 时末行仍在增长。
-	//
-	// **只留当前看着的那一个**（ADR-0020）：切 agent 时整个丢掉、从
-	// GET /history 重新读一遍。判据与 core 侧 idle 释放历史的那条逐字相同——
-	// 内存里那份是不是副本。是副本就能丢，于是 core 里有 20 个还是 200 个 agent，
-	// TUI 这边的行缓冲一样大。
+	// 当前 agent 的行流（原始文本，不含 ANSI）。m.open 时末行仍在增长。
+	// 它是盘上会话的副本，切 agent 时丢掉重读。
 	lines     []line
-	open      bool           // 末行是否还在流式增长
-	vp        viewport.Model // 滚动归库管（ADR-0020）：不自建 scrollback
+	open      bool // 末行是否还在流式增长
+	vp        viewport.Model
 	eventsCh  <-chan client.Event
 	ed        editor // 输入行编辑器
 	width     int
@@ -120,15 +111,14 @@ func sendCmd(c *client.Client, input string) tea.Cmd {
 	}
 }
 
-// historyMsg 携带 GET /history 的回放帧
+// historyMsg 携带 GET /session 的回放帧
 type historyMsg struct {
 	agentID int
 	frames  []client.Frame
 	err     error
 }
 
-// fetchHistoryCmd 拉一个 agent 的历史。带上 agentID 一起回来——回来时用户可能
-// 已经又切走了，那份历史就该丢掉，而不是画到别人的屏幕上
+// fetchHistoryCmd 拉一个 agent 的历史，带回 agentID：回来时用户可能已经切走了
 func fetchHistoryCmd(c *client.Client, agentID int) tea.Cmd {
 	return func() tea.Msg {
 		f, err := c.FetchSession(agentID)
@@ -136,7 +126,7 @@ func fetchHistoryCmd(c *client.Client, agentID int) tea.Cmd {
 	}
 }
 
-// agentsMsg 携带 GET /agents 的清单（只有本组那些，ADR-0021）
+// agentsMsg 携带 GET /agents 的清单
 type agentsMsg struct {
 	list []client.AgentInfo
 	err  error
@@ -178,21 +168,15 @@ func (m model) Init() tea.Cmd {
 		fetchHistoryCmd(m.client, m.client.AgentID()))
 }
 
-// Update 是唯一的状态入口：先跑业务，再把行流铺进 viewport。
-// 铺的动作收口在这一处——别处只管往 m.lines 追加，谁都不用操心滚动与折行。
+// Update 先跑业务，再把行流铺进 viewport。别处只管往 m.lines 追加。
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
 	m = next
 	return m.sync(), cmd
 }
 
-// sync 把行流按当前宽度折好铺进 viewport，高度取「屏幕减去底下那块」。
-//
-// 每帧全量重铺，不做增量：折行是纯函数（同样的行 + 同样的宽 = 同样的结果），
-// 增量维护要多存一份「上次铺到哪」并保证它永远跟得上，那份状态才是 bug 的来源。
-//
-// 本来贴着底就继续贴着底，用户自己滚上去看历史就别把他拽回来——
-// 这是「新内容来了要不要跟」的唯一判据，不需要一个"自动滚动"开关。
+// sync 每帧全量重铺：折行是纯函数，增量维护要多一份会跟丢的状态。
+// 原本贴着底就继续贴底；用户滚上去了就不拽回来。
 func (m model) sync() model {
 	width := m.viewWidth()
 	h := m.height - len(m.chrome(width))
@@ -205,8 +189,7 @@ func (m model) sync() model {
 	for _, l := range m.lines {
 		rows = append(rows, render(l, width)...)
 	}
-	// 不足一屏时在**上方**补空行：对话是从下往上长的，头几句该贴着输入框，
-	// 不该吊在屏幕顶上。viewport 从上往下铺，所以这一补只能补在数据这一侧
+	// 不足一屏时在上方补空行：头几句贴着输入框
 	if pad := h - len(rows); pad > 0 {
 		rows = append(make([]string, pad), rows...)
 	}
@@ -261,8 +244,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		return m.handleKey(v)
 
 	case sendMsg:
-		// POST /message 立即返回 {"status":"processing"}（无 reply），不构成回复；
-		// 兜底仅在 POST 自身失败或返回明确结果时触发（正常定稿由事件流完成）。
+		// 普通消息回 processing，回复走推送流；这里只处理失败与斜杠命令结果
 		if !m.awaiting {
 			return m, nil
 		}
@@ -278,16 +260,14 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		case v.reply.Ok:
 			m.awaiting = false
 			m.busy.stop() // 命令不启动 agent turn，收到结果即收工
-			// 无参的 /model /resume 求的是「选一个」，不是「看一坨文本」：
-			// 同一份 data 载荷直接做成子面板（panel.go）。造不出面板才退回文本。
+			// 无参的 /model /resume 是要选一个：做成子面板，造不出才退回文本
 			if m.panelWant == v.reply.Command {
 				if p := makePanel(v.reply.Command, v.reply.Data, m.client.AgentID()); p != nil {
 					m.panel = p
 					return m, nil
 				}
 			}
-			// 斜杠命令结果（core 返回 {"ok":true,"command":...}），渲染为 info 行。
-			text := describeCommand(v.reply.Command, v.reply.Messages)
+			text := describeCommand(v.reply.Command)
 			switch v.reply.Command {
 			case "model":
 				text = renderModels(v.reply.Data)
@@ -297,15 +277,11 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				text = renderPlugins(v.reply.Data)
 			}
 			m.emit("info", text)
-		case v.reply.Reply != "":
-			m.emit("assistant", v.reply.Reply)
-			m.awaiting = false
-			m.busy.stop()
 		}
 		return m, nil
 
 	case historyMsg:
-		// 回来时用户可能已经切走了：那份历史属于别人，丢掉
+		// 用户已经切走了：丢掉
 		if v.agentID != m.client.AgentID() {
 			return m, nil
 		}
@@ -313,12 +289,12 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			m.emit("error", "读历史失败: "+v.err.Error())
 			return m, nil
 		}
-		// 回放走的就是实时那条路：帧同形，渲染器同一个（ADR-0020）
+		// 回放帧与实时帧同形，走同一个渲染器
 		for _, f := range v.frames {
 			m.handleEvent(client.Event{Type: f.Type, Payload: string(f.Data)})
 		}
 		m.closeLine()
-		m.busy.stop() // 回放不是"正在跑"，读秒行别被历史里的 turn_start 点着
+		m.busy.stop() // 别让历史里的 turn_start 点着读秒行
 		return m, nil
 
 	case agentsMsg:
@@ -380,7 +356,7 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 	case "esc":
 		switch {
 		case len(m.menuMatches()) > 0:
-			m.menuHid = true // 只收菜单，不清输入——用户打的字是他的，别替他扔了
+			m.menuHid = true // 只收菜单，不清输入
 		case m.busy.active:
 			return m, interruptCmd(m.client)
 		}
@@ -399,10 +375,8 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		return m.menuNav("tab")
 
 	case "up", "down":
-		// 菜单开着时方向键归菜单，否则归滚动（ADR-0020）。
-		// **不开 mouse mode**——开了就把终端原生的选中与复制整个关掉
-		// （bubbletea issue #162），而现代终端的 alternate scroll 会在 altscreen 里
-		// 把滚轮转成方向键，正好喂到这儿。滚轮因此不需要任何代码
+		// 菜单开着归菜单，否则滚动。不开 mouse mode（会关掉终端的选中复制），
+		// 终端的 alternate scroll 会把滚轮转成方向键送到这里
 		if len(m.menuMatches()) > 0 {
 			return m.menuNav(v.String())
 		}
@@ -456,8 +430,7 @@ func (m model) menuOpen() bool {
 	return !m.menuHid && strings.HasPrefix(m.ed.value(), "/")
 }
 
-// localCmds 是**不经 core** 的斜杠命令：合进菜单，但在 submitInput 里就地处理。
-// 判据是"这件事 core 管不着"——展示偏好是客户端状态，退出的是客户端进程。
+// localCmds 是不经 core 的斜杠命令：合进菜单，在 submitInput 里就地处理。
 var localCmds = []client.Command{
 	statuslineCmd, // statusline.go
 	{Name: "agents", Description: "切到本组的另一个 agent（无参 = 列出来选）"},
@@ -513,8 +486,7 @@ func (m model) menuNav(key string) (model, tea.Cmd) {
 	return m, nil
 }
 
-// panelKey 处理子面板按键：↑/↓（Tab/Shift+Tab 同义）移动高亮，Enter 确认，Esc 取消。
-// 确认走的就是 submitInput——面板只是替用户把命令打全了，没有第二套提交路径。
+// panelKey：↑/↓（Tab/Shift+Tab）移动，Enter 确认（替用户打全命令再走 submitInput），Esc 取消。
 func (m model) panelKey(key string) (model, tea.Cmd) {
 	p := m.panel
 	switch key {
@@ -546,20 +518,16 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	m.ed.clear()
 	m.menuSel = 0
 	m.panelWant = panelWantOf(input, fromPanel)
-	// **只回显斜杠命令**：它不进任何 agent 的收件箱，core 那头不会为它发帧，
-	// 不回显就没人画。普通消息相反——core 收下它就发一帧 message_start 带正文
-	// 回来（ADR-0019 §5），本地再画一遍就是画两遍
+	// 只回显斜杠命令：普通消息由 core 的 message_start 帧画
 	if strings.HasPrefix(input, "/") {
 		m.emit("user", input)
 	}
 
-	// /quit 是纯客户端命令：退出的是 TUI 这个进程，core 是常驻服务、还连着别的客户端，
-	// 它没有"退出"这个概念。发给 core 只会换回一个 unknown command。
+	// 以下三条是纯客户端命令
 	if cmd, _ := splitCommand(input); cmd == "/quit" {
 		return m, tea.Quit
 	}
 
-	// /statusline 是纯客户端命令（statusline.go）：core 不认展示偏好，本地处理，不占用网络往返
 	if cmd, rest := splitCommand(input); cmd == "/statusline" {
 		if rest == "" {
 			m.panel = m.sl.panel() // 无参 = 开面板选，面板本身就是配置一览
@@ -574,8 +542,7 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 		return m, nil
 	}
 
-	// /agents 也是纯客户端命令：切的是"我在看谁"，core 那头一个字节都不变。
-	// 无参 = 拿清单开面板选，带 id = 直接切过去（校验交给 core）
+	// /agents：无参 = 开面板选，带 id = 直接切
 	if cmd, rest := splitCommand(input); cmd == "/agents" {
 		if rest == "" {
 			return m, fetchAgentsCmd(m.client)
@@ -586,15 +553,11 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	}
 
 	m.awaiting = true
-	// 读秒从按下 Enter 起算（不等 turn_start，网络往返也是等待）
+	// 读秒从按下 Enter 起算
 	return m, tea.Batch(sendCmd(m.client, input), m.busy.begin("发送中", time.Now()))
 }
 
-// attach 切到另一个 agent：**丢掉当前那份行流，从 GET /history 重新读一遍**。
-//
-// 内存里那份是副本（盘上那份逐字相同），所以丢得掉——判据与 core 侧 idle 释放
-// 对话历史的那条逐字相同（ADR-0019 §7、ADR-0020 §3）。于是不管组里有 2 个还是
-// 200 个 agent，TUI 的行缓冲一样大。
+// attach 切到另一个 agent：丢掉当前行流，从 GET /session 重读。
 func (m model) attach(id int) (model, tea.Cmd) {
 	if id == m.client.AgentID() {
 		return m, nil
@@ -627,14 +590,8 @@ func (m model) decideApproval(allow bool) (model, tea.Cmd) {
 
 // handleEvent 处理推送流事件，返回需要执行的 tea.Cmd（读秒计时循环的启动）
 func (m *model) handleEvent(ev client.Event) tea.Cmd {
-	// core **不为任何 agent 过滤事件**：全推，每帧带 agent_id，客户端认识哪个渲染哪个
-	// （ADR-0019 §5）。于是杂活 agent 失败时用户看得见——那不需要 core 设计任何东西，
-	// 只需要它不设计过滤，认领的活儿归这里。
-	//
-	// 审批是唯一不分拣的：它是全局的，不管正在看哪个 agent 都要弹出来，
-	// 靠帧里的 agent_id 说明是谁在问。按"当前看着谁"过滤，会让一个没人看的 agent
-	// 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。
-	// 没有 agent_id 的帧（statusline）是进程级的，也不分拣。
+	// core 全推，每帧带 agent_id，这里只留当前 agent 的。审批例外：不管在看谁都要弹。
+	// 没有 agent_id 的帧（statusline）是进程级的。
 	var who struct {
 		AgentID int `json:"agent_id"`
 	}
@@ -648,9 +605,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		return m.busy.begin("思考中", time.Now())
 
 	case "message_start":
-		// 收件箱里三种来源都是 user 消息（人发的、别的 agent 发的、完成通知），
-		// 发信人写在正文里（ADR-0019 §5）。用户自己打的那条也走这条路——
-		// 不在本地回显，于是实时看和翻历史看走的是同一段代码（ADR-0020）
+		// 收件箱三种来源都是 user；用户自己打的那条也从这里画
 		var d struct {
 			Text string `json:"text"`
 		}
@@ -680,15 +635,13 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.closeLine()
 
 	case "statusline":
-		// core 那边状态栏载荷变了（/model 切档）就推一帧过来：
-		// 覆盖写，与启动时 GET /statusline 同一份载荷，TUI 不问是谁改的
+		// 与 GET /statusline 同一份载荷，覆盖写
 		var d client.Statusline
 		jsonUnmarshal(ev.Payload, &d)
 		m.sl.model = d.Model
 
 	case "status_update":
-		// core 给的是本次 run 累计的绝对值：覆盖写，TUI 不做任何算术。
-		// 帧是开放键集，这里只取认得的键，不认识的忽略（ADR-0009）
+		// 本次 run 累计的绝对值，覆盖写
 		jsonUnmarshal(ev.Payload, &m.busy.cost)
 
 	case "tool_execution_start":
@@ -701,10 +654,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		return m.busy.begin(toolVerb(d.Name), time.Now())
 
 	case "tool_output":
-		// 工具边跑边推的 stdout（PROTOCOL.md）。走 stream 而不是 emit：
-		// core 按行推，但超长行会被切成几帧、末行可能没有换行符——
-		// 只有"续写开着的行"才能把它们重新拼成用户看到的那一行。
-		// 完整输出稍后仍随 tool_result 回来，这里推的只是"现在长什么样"。
+		// 工具边跑边推的输出。走 stream（续写开着的行）：末行可能没有换行符
 		var d struct {
 			Text string `json:"text"`
 		}
@@ -726,7 +676,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		return m.busy.begin("思考中", time.Now()) // 工具完事，等下一轮 LLM
 
 	case "permission_request":
-		// ADR-0005：core 请求审批（agent 阻塞等待），进入审批模态
+		// agent 阻塞等裁决，进审批模态
 		var d struct {
 			ID     string          `json:"id"`
 			Tool   string          `json:"tool"`
@@ -743,21 +693,19 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.approval = nil
 
 	case "turn_end":
-		// 一个 turn 结束**从来不是**收工：主模型没有下一步动作时还要过一道收工判定，
-		// 判不通过下一轮接着跑（ADR-0025）。读秒因此跨 turn 连续，只认 agent_end。
+		// turn 结束不是收工（还要过收工判定），读秒只认 agent_end
 		m.closeLine()
 		var d struct {
 			Error string `json:"error"`
 		}
 		jsonUnmarshal(ev.Payload, &d)
-		// core 报的失败必须落到对话流里：只写 stderr 等于没人知道
-		// （core 的 stderr 在 make dev 下被重定向进 build/core.log）
+		// core 报的失败落到对话流里
 		if d.Error != "" {
 			m.emit("error", "✗ "+d.Error)
 		}
 
 	case "agent_end":
-		// 唯一的收工信号。收工判定说这趟到头了、出错、被中断——四条路最后都到这一帧
+		// 唯一的收工信号
 		m.closeLine()
 		m.awaiting = false
 		m.busy.stop()
@@ -783,12 +731,9 @@ func jsonUnmarshal(s string, v any) {
 
 // ==================== 渲染 ====================
 
-// chrome 是屏幕底下那块：空行 + 审批框 + 斜杠菜单 + 读秒状态行 + 输入框 + 状态栏。
-//
-// 它先算出来，因为 viewport 的高度就是「屏幕减去它」——两处各算一遍高度，
-// 迟早差一行，然后是永远差一行的花屏。
+// chrome 是屏幕底下那块。viewport 高度 = 屏幕减去它，所以高度只在这里算。
 func (m model) chrome(width int) []string {
-	// 历史与下方交互区之间留一行空白。它不属于历史——历史里塞空行等于把记录撑稀
+	// 历史与交互区之间留一行空白
 	rows := []string{""}
 	if m.approval != nil {
 		rows = append(rows, renderApproval(m.approval, width)...)
@@ -809,8 +754,7 @@ func (m model) chrome(width int) []string {
 	return rows
 }
 
-// View 画整个屏幕：历史（viewport，可滚）+ 底下那块。
-// altscreen 之后没有「活动区」这个概念了——活动区就是整个屏幕（ADR-0020）。
+// View 画整个屏幕：历史（viewport）+ 底下那块。
 func (m model) View() string {
 	width := m.viewWidth()
 	return m.vp.View() + "\n" + strings.Join(m.chrome(width), "\n")
@@ -835,25 +779,12 @@ func renderMenu(cmds []client.Command, sel, width int) []string {
 	return out
 }
 
-// describeCommand 把 core 的命令结果（ok:true + command）渲染为 info 消息
-func describeCommand(name string, messages int) string {
-	switch name {
-	case "new":
-		return "✅ 已新建会话（对话历史已清空）"
-	case "resume":
-		if messages > 0 {
-			return fmt.Sprintf("📄 当前会话共 %d 条消息", messages)
-		}
-		return "📄 会话已切换"
-	}
+// describeCommand 是没有专门渲染器（或载荷解不开）时的通用结果行
+func describeCommand(name string) string {
 	return "✅ 命令已执行: /" + name
 }
 
-// renderPlugins 把 /plugins 渲染成多行 info 文本（ADR-0024）。
-//
-// 只读：装 = git clone 进 ~/.realagent/plugins/，卸 = 删掉那个目录。没有 enable/disable。
-// errors 那一段是 MCP 没连上、hooks.json 读坏的原话——core 是常驻服务，
-// 那些话本来只进 stderr，用户看不见。
+// renderPlugins 把 /plugins 渲染成多行 info 文本，末尾列出建 agent 时的错误。
 func renderPlugins(data json.RawMessage) string {
 	var p struct {
 		Plugins []struct {
@@ -871,7 +802,7 @@ func renderPlugins(data json.RawMessage) string {
 		Errors []string `json:"errors"`
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
-		return "✅ 命令已执行: /plugins"
+		return describeCommand("plugins")
 	}
 	var b strings.Builder
 	if len(p.Plugins) == 0 {
@@ -886,7 +817,7 @@ func renderPlugins(data json.RawMessage) string {
 			name += " v" + x.Version
 		}
 		b.WriteString("📦 " + name + "\n")
-		// 只列非零的：一行「skill 0 命令 0 agent 0」等于没说
+		// 只列非零的
 		var parts []string
 		for _, kv := range []struct {
 			n int
@@ -911,15 +842,13 @@ func renderPlugins(data json.RawMessage) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderSessions 把 /new /resume 的会话清单渲染为多行 info 文本。
-// 当前会话打 ▸，其余只是列出来——真要挑一个走的是面板（panel.go sessionPanel）。
+// renderSessions 把 /new /resume 的会话清单渲染为多行 info 文本，当前会话打 ▸。
 func renderSessions(command string, data json.RawMessage, agentID int) string {
 	var list []client.SessionInfo
 	if err := json.Unmarshal(data, &list); err != nil {
-		return describeCommand(command, 0)
+		return describeCommand(command)
 	}
-	// 「当前」= 被我这个 agent 打开着的那一条。别的 agent 打开着的也在清单里，
-	// 只是不是我的（ADR-0019 §10）
+	// 「当前」= 被我这个 agent 打开着的那一条
 	var cur client.SessionInfo
 	for _, s := range list {
 		if s.OpenedBy == agentID {
@@ -952,7 +881,7 @@ func renderSessions(command string, data json.RawMessage, agentID int) string {
 func renderModels(data json.RawMessage) string {
 	var list []client.ModelInfo
 	if err := json.Unmarshal(data, &list); err != nil {
-		return "✅ 命令已执行: /model" // 载荷解析失败降级为通用提示
+		return describeCommand("model")
 	}
 	if len(list) == 0 {
 		return "✅ /model: 无模型清单（模型数据表是空的）"
@@ -1008,13 +937,11 @@ func main() {
 		addr = os.Args[1]
 	}
 	c := client.New(addr)
-	// TUI 退出即关组（ADR-0021）：core 里不存在没有所有者的 agent。
-	// 代价是「关掉终端让 agent 跑一夜」这个用法明确不做
+	// 退出时通知 core（ADR-0021）
 	defer c.Close()
 	defer c.CloseGroup()
 
-	// core 启动时 agent 数为 0，不自动建（ADR-0019）——自动建就得替用户猜 workdir。
-	// 客户端知道用户站在哪，所以由它给：这是客户端替用户填的默认值，不是 core 的。
+	// core 不自动建 agent：workdir 由客户端给，它知道用户站在哪
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "取不到当前目录:", err)
@@ -1025,12 +952,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 进 alternate screen（ADR-0020 取代 ADR-0008）：scrollback 是一条只能追加的
-	// 时间线，表达不了「换一个 agent 看」。代价照记——退出即消失、不能 tee、不能管道。
-	//
-	// **仍然不开鼠标模式**：选中与复制没有任何库提供，它一直是终端的能力，
-	// 而 mouse mode 一开就把它整个关掉（bubbletea issue #162）。滚轮靠现代终端的
-	// alternate scroll 转成方向键，正好喂给 viewport。
+	// alternate screen 才能「换一个 agent 看」（ADR-0020）。不开鼠标模式：会关掉终端的选中复制
 	p := tea.NewProgram(initialModel(c), tea.WithAltScreen())
 	if _, err = p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "TUI 运行失败:", err)

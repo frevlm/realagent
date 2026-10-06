@@ -250,20 +250,8 @@ func TestMenuWindow(t *testing.T) {
 }
 
 func TestDescribeCommand(t *testing.T) {
-	cases := []struct {
-		name     string
-		messages int
-		wantSub  string
-	}{
-		{"new", 0, "新建会话"},
-		{"resume", 5, "5 条消息"},
-		{"unknown", 0, "/unknown"},
-	}
-	for _, c := range cases {
-		got := describeCommand(c.name, c.messages)
-		if !strings.Contains(got, c.wantSub) {
-			t.Errorf("describeCommand(%q) = %q, want contains %q", c.name, got, c.wantSub)
-		}
+	if got := describeCommand("unknown"); !strings.Contains(got, "/unknown") {
+		t.Errorf("describeCommand = %q, want contains /unknown", got)
 	}
 }
 
@@ -276,7 +264,7 @@ func TestCommandResultRendered(t *testing.T) {
 	if len(m.lines) != 1 {
 		t.Fatalf("命令结果应产生 1 行，got %d", len(m.lines))
 	}
-	if m.lines[0].role != "info" || !strings.Contains(m.lines[0].text, "新建会话") {
+	if m.lines[0].role != "info" || !strings.Contains(m.lines[0].text, "/new") {
 		t.Errorf("命令结果应为 info 渲染，got %+v", m.lines[0])
 	}
 	if m.awaiting {

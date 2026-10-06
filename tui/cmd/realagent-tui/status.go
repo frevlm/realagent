@@ -1,7 +1,6 @@
 // 读秒状态行（输入框上方）：模型在干什么 + 已耗时，参考 claude code。
 //
-// 数据结构决定一切：整个特性只有 activity 一个状态，active=false 即空闲，
-// 渲染层与事件层都不需要额外的特殊判断分支。
+// 只有 activity 一个状态，active=false 即空闲。
 package main
 
 import (

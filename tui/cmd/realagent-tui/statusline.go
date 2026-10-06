@@ -48,7 +48,7 @@ func pickIconSet() string {
 
 // statusline 是状态栏的数据源 + 展示偏好
 type statusline struct {
-	model  string // GET /status 拿到的模型名；空 = 未知，段隐藏
+	model  string // GET /statusline 拿到的模型名；空 = 未知，段隐藏
 	dir    string // 进程 cwd 的 basename
 	branch string // 当前 git 分支；非 git 仓库则空，段隐藏
 

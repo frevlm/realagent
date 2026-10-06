@@ -1,11 +1,8 @@
-// 子面板：斜杠命令的第二层选择（参考 codex cli 的 /model 弹窗）。
+// 子面板：斜杠命令的第二层选择。
 //
-// 数据结构决定一切：面板就是「一列可选项 + 一个高亮下标」，每项自带确认时
-// 要发的整条命令（submit）。确认 = 把 submit 写进输入框走 submitInput——
-// 和用户自己打出来那条路一模一样，没有第二套提交逻辑，也就没有第二套 bug。
-//
-// 面板数据不新增端点：core 的 /model /resume 回包本来就带 data 载荷，
-// 原先拿它渲染文本，现在拿它渲染可选项。
+// 面板 = 一列可选项 + 一个高亮下标，每项自带确认时要发的整条命令（submit）。
+// 确认就是把 submit 写进输入框走 submitInput，与手打同一条路。
+// 数据来自 /model /resume 回包里本来就有的 data 载荷。
 package main
 
 import (
@@ -33,8 +30,7 @@ type panel struct {
 	sel   int
 }
 
-// makePanel 按命令名与结果载荷造面板；造不出（无数据/不认识的命令）返回 nil，
-// 调用方退回原来的文本输出——面板是锦上添花，不是新的失败点。
+// makePanel 按命令名与结果载荷造面板；造不出返回 nil，调用方退回文本输出。
 func makePanel(command string, data json.RawMessage, agentID int) *panel {
 	switch command {
 	case "model":
