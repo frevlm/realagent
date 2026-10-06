@@ -74,15 +74,6 @@ void Agents::on_done(int id, const std::string &summary)
     }
 }
 
-void Agents::interrupt(int id)
-{
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (id > 0 && id <= cnt_ && nodes_[id])
-    {
-        nodes_[id]->interrupt();
-    }
-}
-
 void Agents::close(int id)
 {
     std::unique_ptr<Agent> doomed;

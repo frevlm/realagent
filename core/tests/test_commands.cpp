@@ -19,7 +19,7 @@
 #include <fstream>
 #include <string>
 
-#include "agent/commands.hpp"
+#include "agent/catalog.hpp"
 
 namespace fs = std::filesystem;
 using realagent::expand_arguments;

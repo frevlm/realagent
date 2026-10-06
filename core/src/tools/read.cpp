@@ -1,8 +1,5 @@
 /*
- * read.cpp — read 工具：把文件按行打出来，每行前面挂上 edit 要用的 anchor
- *
- * 行号与 hash 不是给人看的装饰，是 edit 的两个入参（ADR-0018）。
- * 模型不用数行、不用猜——它刚读到的那两个值原样填回去就行。
+ * read.cpp — 按行打出文件，每行前缀 `行号 hash`，正是 edit 的两个入参（ADR-0018）
  */
 #include "tools/tools.hpp"
 

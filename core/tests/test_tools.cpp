@@ -424,6 +424,22 @@ int main()
         CHECK(elapsed < std::chrono::seconds(5), "在跑的 bash 被打断，不是等它自己跑完");
         CHECK(intr(r), "结果标出这次是被中止的（与工具自己失败不是一回事）");
     }
+    {
+        // 两个 agent 各跑一条 bash：中断一个，另一个不受牵连
+        Config cfg = config_with("allow-all");
+        ApprovalCoordinator ap;
+        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        Executor a(ctx, ap, g_home.string()), b(ctx, ap, g_home.string());
+        json ra, rb;
+        std::thread ta([&] { ra = a.execute("a1", "bash", R"({"command":"sleep 30"})"); });
+        std::thread tb([&] { rb = b.execute("b1", "bash", R"({"command":"sleep 1; echo b-done"})"); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        a.interrupt();
+        ta.join();
+        tb.join();
+        CHECK(intr(ra), "被中断的那个标出 interrupted");
+        CHECK(!intr(rb) && st(rb) == 0 && msg(rb) == "b-done\n", "另一个照常跑完");
+    }
 
     printf("\n== MCP 接进来了（ADR-0023）：一个分支，判的是代码在哪儿跑 ==\n");
     {

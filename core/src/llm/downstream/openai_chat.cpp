@@ -21,32 +21,11 @@ namespace realagent {
 
 namespace {
 
-/* 数值字段，缺失/类型不符按 0 */
-long long num_of(const nlohmann::json &o, const char *key)
-{
-    const auto it = o.find(key);
-    return it != o.end() && it->is_number_integer() ? it->get<long long>() : 0;
-}
-
-/* 取字符串字段；缺失或不是字符串返回空串（各家给的 delta 字段并不齐全） */
-std::string str_of(const nlohmann::json &o, const char *key)
-{
-    const auto it = o.find(key);
-    return it != o.end() && it->is_string() ? it->get<std::string>() : std::string();
-}
-
-void close_thinking(OpenAiChatState &st, const EventSink &sink)
-{
-    if (!st.reasoning_open) return;
-    st.reasoning_open = false;
-    if (sink) sink("thinking_stop", nlohmann::json::object());
-}
-
 /* 收工：先把攒好的工具调用发出去，再发 stop。顺序不能反——
  * 上层收到 stop 就当本轮结束了，之后来的 tool_use 没人接。 */
 void finish(OpenAiChatState &st, const EventSink &sink)
 {
-    close_thinking(st, sink);
+    close_thinking(st.reasoning_open, sink);
     if (sink)
     {
         for (const long long idx : st.tool_order)
@@ -99,12 +78,12 @@ bool feed_block(protocol::OpenAiChat, OpenAiChatState &st, std::string_view bloc
 
         if (const auto u = o.find("usage"); u != o.end() && u->is_object())
         {
-            if (const long long n = num_of(*u, "prompt_tokens"); n > 0) st.usage.input = n;
-            if (const long long n = num_of(*u, "completion_tokens"); n > 0) st.usage.output = n;
+            if (const long long n = json_int(*u, "prompt_tokens"); n > 0) st.usage.input = n;
+            if (const long long n = json_int(*u, "completion_tokens"); n > 0) st.usage.output = n;
             if (const auto pd = u->find("prompt_tokens_details");
                 pd != u->end() && pd->is_object())
             {
-                if (const long long n = num_of(*pd, "cached_tokens"); n > 0)
+                if (const long long n = json_int(*pd, "cached_tokens"); n > 0)
                     st.usage.cache_read = n;
             }
             emit_usage(st.usage, sink);
@@ -119,8 +98,8 @@ bool feed_block(protocol::OpenAiChat, OpenAiChatState &st, std::string_view bloc
             const nlohmann::json &d = *delta;
 
             // 思考内容：两个字段名都认，同一件事
-            std::string reasoning = str_of(d, "reasoning_content");
-            if (reasoning.empty()) reasoning = str_of(d, "reasoning");
+            std::string reasoning = json_str(d, "reasoning_content");
+            if (reasoning.empty()) reasoning = json_str(d, "reasoning");
             if (!reasoning.empty() && sink)
             {
                 if (!st.reasoning_open)
@@ -132,32 +111,32 @@ bool feed_block(protocol::OpenAiChat, OpenAiChatState &st, std::string_view bloc
                 sink("thinking_update", nlohmann::json{{"delta", reasoning}});
             }
 
-            if (const std::string text = str_of(d, "content"); !text.empty())
+            if (const std::string text = json_str(d, "content"); !text.empty())
             {
-                close_thinking(st, sink); // 正文开始 = 思考结束，本协议不另发结束帧
+                close_thinking(st.reasoning_open, sink); // 正文开始 = 思考结束，本协议不另发结束帧
                 if (sink) sink("message_update", nlohmann::json{{"delta", text}});
             }
 
             if (const auto tcs = d.find("tool_calls"); tcs != d.end() && tcs->is_array())
             {
-                close_thinking(st, sink);
+                close_thinking(st.reasoning_open, sink);
                 for (const nlohmann::json &tc : *tcs)
                 {
-                    const long long idx = num_of(tc, "index");
+                    const long long idx = json_int(tc, "index");
                     auto [it, fresh] = st.tools.try_emplace(idx);
                     if (fresh) st.tool_order.push_back(idx);
-                    if (const std::string id = str_of(tc, "id"); !id.empty()) it->second.id = id;
+                    if (const std::string id = json_str(tc, "id"); !id.empty()) it->second.id = id;
                     if (const auto fn = tc.find("function"); fn != tc.end() && fn->is_object())
                     {
-                        if (const std::string n = str_of(*fn, "name"); !n.empty())
+                        if (const std::string n = json_str(*fn, "name"); !n.empty())
                             it->second.name = n;
-                        it->second.args += str_of(*fn, "arguments");
+                        it->second.args += json_str(*fn, "arguments");
                     }
                 }
             }
         }
 
-        if (const std::string fr = str_of(c0, "finish_reason"); !fr.empty())
+        if (const std::string fr = json_str(c0, "finish_reason"); !fr.empty())
         {
             st.finish_reason = fr;
             finish(st, sink);

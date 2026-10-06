@@ -19,31 +19,6 @@
 
 namespace realagent {
 
-namespace {
-
-/* 数值字段，缺失/类型不符按 0 */
-long long num_of(const nlohmann::json &o, const char *key)
-{
-    const auto it = o.find(key);
-    return it != o.end() && it->is_number_integer() ? it->get<long long>() : 0;
-}
-
-/* 取字符串字段；缺失或不是字符串返回空串（各家给的 delta 字段并不齐全） */
-std::string str_of(const nlohmann::json &o, const char *key)
-{
-    const auto it = o.find(key);
-    return it != o.end() && it->is_string() ? it->get<std::string>() : std::string();
-}
-
-void close_thinking(OpenAiResponsesState &st, const EventSink &sink)
-{
-    if (!st.reasoning_open) return;
-    st.reasoning_open = false;
-    if (sink) sink("thinking_stop", nlohmann::json::object());
-}
-
-} // namespace
-
 bool feed_block(protocol::OpenAiResponses, OpenAiResponsesState &st, std::string_view block,
                 const EventSink &sink)
 {
@@ -54,12 +29,12 @@ bool feed_block(protocol::OpenAiResponses, OpenAiResponsesState &st, std::string
         const nlohmann::json o = nlohmann::json::parse(sb.data, nullptr, false);
         if (o.is_discarded() || !o.is_object()) return true;
         // 类型优先取 event: 行；有些实现在 data 里也带一份 type，两处一致时取哪个都一样
-        const std::string t = !sb.event.empty() ? sb.event : str_of(o, "type");
+        const std::string t = !sb.event.empty() ? sb.event : json_str(o, "type");
 
         if (t == "response.output_text.delta")
         {
-            close_thinking(st, sink);
-            if (sink) sink("message_update", nlohmann::json{{"delta", str_of(o, "delta")}});
+            close_thinking(st.reasoning_open, sink);
+            if (sink) sink("message_update", nlohmann::json{{"delta", json_str(o, "delta")}});
         }
         else if (t == "response.reasoning_summary_text.delta" ||
                  t == "response.reasoning_text.delta")
@@ -72,45 +47,45 @@ bool feed_block(protocol::OpenAiResponses, OpenAiResponsesState &st, std::string
                     // 本协议不给 signature，字段留着让上层一视同仁
                     sink("thinking_start", nlohmann::json{{"signature", ""}});
                 }
-                sink("thinking_update", nlohmann::json{{"delta", str_of(o, "delta")}});
+                sink("thinking_update", nlohmann::json{{"delta", json_str(o, "delta")}});
             }
         }
         else if (t == "response.reasoning_summary_text.done" ||
                  t == "response.reasoning_text.done")
         {
-            close_thinking(st, sink);
+            close_thinking(st.reasoning_open, sink);
         }
         else if (t == "response.output_item.added")
         {
             if (const auto item = o.find("item"); item != o.end() && item->is_object())
             {
-                if (str_of(*item, "type") == "function_call")
+                if (json_str(*item, "type") == "function_call")
                 {
-                    close_thinking(st, sink);
-                    st.tool_id_ = str_of(*item, "call_id");
-                    st.tool_name_ = str_of(*item, "name");
+                    close_thinking(st.reasoning_open, sink);
+                    st.tool_id_ = json_str(*item, "call_id");
+                    st.tool_name_ = json_str(*item, "name");
                     st.tool_input_.clear();
                 }
             }
         }
         else if (t == "response.function_call_arguments.delta")
         {
-            st.tool_input_ += str_of(o, "delta");
+            st.tool_input_ += json_str(o, "delta");
         }
         else if (t == "response.output_item.done")
         {
             const auto item = o.find("item");
             if (item == o.end() || !item->is_object()) return true;
-            if (str_of(*item, "type") != "function_call") return true;
+            if (json_str(*item, "type") != "function_call") return true;
             // 结束帧带全量 arguments 就用它，只有增量就用攒的——两者应当一致
             const std::string args =
-                !str_of(*item, "arguments").empty() ? str_of(*item, "arguments") : st.tool_input_;
+                !json_str(*item, "arguments").empty() ? json_str(*item, "arguments") : st.tool_input_;
             if (sink)
             {
                 nlohmann::json in = nlohmann::json::parse(args.empty() ? "{}" : args, nullptr, false);
                 sink("tool_use",
-                     nlohmann::json{{"id", st.tool_id_.empty() ? str_of(*item, "call_id") : st.tool_id_},
-                                    {"name", st.tool_name_.empty() ? str_of(*item, "name") : st.tool_name_},
+                     nlohmann::json{{"id", st.tool_id_.empty() ? json_str(*item, "call_id") : st.tool_id_},
+                                    {"name", st.tool_name_.empty() ? json_str(*item, "name") : st.tool_name_},
                                     {"input", in.is_discarded() ? nlohmann::json::object() : in}});
             }
             st.tool_id_.clear();
@@ -120,17 +95,17 @@ bool feed_block(protocol::OpenAiResponses, OpenAiResponsesState &st, std::string
         }
         else if (t == "response.completed" || t == "response.incomplete")
         {
-            close_thinking(st, sink);
+            close_thinking(st.reasoning_open, sink);
             if (const auto r = o.find("response"); r != o.end() && r->is_object())
             {
                 if (const auto u = r->find("usage"); u != r->end() && u->is_object())
                 {
-                    if (const long long n = num_of(*u, "input_tokens"); n > 0) st.usage.input = n;
-                    if (const long long n = num_of(*u, "output_tokens"); n > 0) st.usage.output = n;
+                    if (const long long n = json_int(*u, "input_tokens"); n > 0) st.usage.input = n;
+                    if (const long long n = json_int(*u, "output_tokens"); n > 0) st.usage.output = n;
                     if (const auto d = u->find("input_tokens_details");
                         d != u->end() && d->is_object())
                     {
-                        if (const long long n = num_of(*d, "cached_tokens"); n > 0)
+                        if (const long long n = json_int(*d, "cached_tokens"); n > 0)
                             st.usage.cache_read = n;
                     }
                     emit_usage(st.usage, sink);

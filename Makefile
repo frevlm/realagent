@@ -10,7 +10,7 @@ TUI       := $(BUILD_DIR)/realagent-tui
 $(NINJA):
 	cmake -S . -B $(BUILD_DIR) -G Ninja
 
-.PHONY: all core tui tool-test test run tui-run fmt fmt-check clean help
+.PHONY: all core tui test run tui-run fmt fmt-check clean help
 
 all: core tui        ## 构建全部（core + TUI），默认目标
 
@@ -19,9 +19,6 @@ core: $(NINJA)       ## 构建 core（C++ QUIC/HTTP3 服务）
 
 tui: $(NINJA)        ## 构建 TUI（Go + Bubble Tea）
 	cmake --build $(BUILD_DIR) --target realagent-tui
-
-tool-test: core      ## 工具执行链路验证（read/edit/bash + 权限）
-	$(CORE) test-tools
 
 # core 是 UDP(QUIC) 服务，TCP 端口探测不到，故用启动日志当就绪信号。
 # 注意：recipe 里不能写 shell 注释——续行会让注释吞掉整条命令。

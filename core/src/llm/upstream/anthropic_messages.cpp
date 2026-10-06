@@ -1,13 +1,8 @@
 /*
  * upstream/anthropic_messages.cpp — 抽象对话 → /v1/messages 请求
  *
- * 协议归协议：请求结构、system / messages / tools / tool_choice / stream、
- * thinking 块原样回传带 signature。端点与凭证从配置读，本文件认不出对面是谁。
- *
- * 认证头两个一起发（ADR-0017）：Anthropic 原厂认 x-api-key，
- * DeepSeek 一类兼容端点认 Authorization: Bearer（它们的文档让你设 ANTHROPIC_AUTH_TOKEN）。
- * 同一个凭证的两个名字，实测原厂对多出来的那个头视而不见——
- * 于是不必为"对面是哪一家"开一个配置项，也不必在代码里认 URL。
+ * thinking 块带 signature 原样回传。认证头两个一起发：原厂认 x-api-key，
+ * 兼容端点认 Authorization: Bearer，原厂对多出来的那个视而不见，于是不必认对面是谁。
  */
 #include "llm/llm.hpp"
 #include "tools/tools.hpp"
@@ -16,14 +11,7 @@ namespace realagent {
 
 namespace {
 
-/* 工具结果的块数组 → `/v1/messages` 的块数组。
- *
- * **这一套协议带得动图片**：`tool_result.content` 收 text / image / document /
- * search_result 的数组。但形状不一样——工具那边（照 MCP）是
- * `{"type":"image","data":...,"mimeType":...}`，这边是
- * `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`。
- *
- * 翻译住在这个文件里，因为「这个端点收什么形状」只有它知道（ADR-0017 / ADR-0023 §3）。
+/* 工具结果块（MCP 形状）→ /v1/messages 块。图片改成 `source: {type: base64, ...}`；
  * 带不动的（音频、二进制资源）压成一行文字占位，不悄悄丢掉。 */
 nlohmann::json to_tool_content(const nlohmann::json &content)
 {
@@ -35,8 +23,7 @@ nlohmann::json to_tool_content(const nlohmann::json &content)
         {
             out.push_back({{"type", "text"}, {"text", b.value("text", std::string())}});
         }
-        /* 图片块要齐两样才认。缺一样就整块走占位——替它猜一个 media_type，
-         * 猜错了端点报的错比「缺字段」难查得多。对同一个块只有一种态度。 */
+        // 图片要 data 与 mimeType 齐全，缺一样就走占位，不替它猜
         else if (type == "image" && b.contains("data") && b.contains("mimeType"))
         {
             out.push_back({{"type", "image"},

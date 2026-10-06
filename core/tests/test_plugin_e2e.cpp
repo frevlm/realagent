@@ -13,10 +13,8 @@
 #include <filesystem>
 #include <fstream>
 
-#include "agent/agent_defs.hpp"
-#include "agent/commands.hpp"
+#include "agent/catalog.hpp"
 #include "agent/hooks.hpp"
-#include "agent/skills.hpp"
 #include "mcp/mcp.hpp"
 #include "plugin.hpp"
 

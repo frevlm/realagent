@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-#include "agent/commands.hpp"
+#include "agent/catalog.hpp"
 #include "agent/session.hpp"
 #include "llm/llm.hpp"
 #include "plugin.hpp"
@@ -27,8 +27,7 @@ static nlohmann::json models_payload(const CoreContext &ctx)
     return arr;
 }
 
-/* 打开着的会话可能一条消息都还没有（文件尚未落地），此时它不在扫描结果里——
- * 补一条空的进去，客户端才看得到自己在哪儿。 */
+/* 刚打开的会话可能还没落盘、不在扫描结果里：补一条进去。 */
 nlohmann::json sessions_payload(const Agents &pool, const Agent &agent)
 {
     const std::map<std::string, int> opened = pool.openers();
@@ -85,54 +84,42 @@ std::string ok_json(const char *name, nlohmann::json data)
 
 std::string cmd_new(Env &e, const std::string &)
 {
-    e.agent.reset(); // 新建会话：清空历史 + 换一个 JSONL 文件（旧的留在盘上）
-    // 会话换了一份 → SessionStart 再跑一遍（source 名字照抄 Claude Code，matcher 靠它挑）
+    e.agent.reset();
     e.agent.session_start_hook("clear");
     return ok_json("new", sessions_payload(e.pool, e.agent));
 }
 
 std::string cmd_resume(Env &e, const std::string &arg)
 {
-    // 无参 = 列会话（清单里 opened_by 标出自己在哪儿）；带 id = 恢复那一个。
-    // 恢复失败保持原会话不动：宁可这条命令没生效，也不能把人扔进一段空白历史
+    // 无参 = 列会话；带 id = 恢复那一个，失败时原会话不动
     if (!arg.empty() && !e.agent.resume(arg)) return command_error("unknown session: " + arg);
-    if (!arg.empty()) e.agent.session_start_hook("resume"); // 只在真换了会话时跑
+    if (!arg.empty()) e.agent.session_start_hook("resume");
     return ok_json("resume", sessions_payload(e.pool, e.agent));
 }
 
 std::string cmd_model(Env &e, const std::string &arg)
 {
-    // 无参 = 列清单；带名 = 切主模型（写回 settings.json，下一次调用即生效）。
-    // 只认数据表里的模型：交互式选择就该从已知的里挑，打字选中不存在的
-    // 只会得到一个端点 400。启动时不校验配置是另一回事（ADR-0009）。
+    // 无参 = 列清单；带名 = 切主模型并写回 settings.json。只认模型表里有的
     if (!arg.empty())
     {
         bool known = false;
         for (const nlohmann::json &m : models_payload(e.ctx))
             if (m["name"] == arg) known = true;
         if (!known) return command_error("unknown model: " + arg);
-        // 点对点写：只改文件里的 model 这一个键。statusline 帧不在这里推——
-        // 事件循环发现载荷变了自己会推（见 main.cpp 的 on_tick）
+        // statusline 帧由事件循环发现变化后推
         if (!e.ctx.config->persist("model", nlohmann::json(arg)))
             return command_error("写入 settings.json 失败");
     }
     return ok_json("model", models_payload(e.ctx));
 }
 
-/* /plugins：装了哪些、各贡献了什么、哪些出了问题（ADR-0024 §分期 7）。
- *
- * **只读**。没有 enable / disable——那正是 ADR-0016 铲掉的 `plugins.disabled`；
- * 关掉一个 plugin 就是把目录删了，装一个就是 `git clone` 进去。
- *
- * 问题那一栏是 agent 手上那两份现成的（MCP 连不上的、hooks 读坏的）——
- * 它们本来只进 stderr，而 core 是常驻服务，用户看不见（ADR-0023 §8 那笔账）。 */
+/* /plugins：装了哪些、各带了什么、建 agent 时出了什么问题。只读。 */
 std::string cmd_plugins(Env &e, const std::string &)
 {
     nlohmann::json arr = nlohmann::json::array();
     for (const PluginInfo &p : plugin_infos(e.agent.workdir()))
     {
-        // 什么都没带的隐式 plugin 不列：多数人的 ~/.realagent 就是空的，
-        // 列一行「0 0 0 0 0」只会让真有内容的那几行更难找
+        // 什么都没带的隐式 plugin 不列
         if (p.implicit && !p.skills && !p.commands && !p.agent_defs && !p.mcp_servers && !p.hooks)
             continue;
         arr.push_back(nlohmann::json{{"name", p.name},
@@ -181,7 +168,7 @@ nlohmann::json command_defs(const Agent *agent)
     for (const CommandDef &c : kCommands)
         arr.push_back(
             nlohmann::json{{"name", c.name}, {"description", c.description}, {"kind", "builtin"}});
-    if (!agent) return arr; // 没指名道姓：prompt 命令表跟着 workdir 走，这里没有答案
+    if (!agent) return arr; // prompt 命令跟着 workdir 走
     for (const PromptCommand &c : agent->commands())
         arr.push_back(nlohmann::json{{"name", c.name},
                                      {"description", c.description},
@@ -200,8 +187,7 @@ std::string handle_command(CoreContext &ctx, Agents &pool, Agent &agent,
     while (!arg.empty() && arg.back() == ' ') arg.pop_back();
     const std::string name = cmd.substr(1); // 去掉前导 '/'
 
-    /* builtin：core 的一个动作。**锁在这一支里**——拿不到就回一句"忙着呢"，不排队等
-     * （见 AGENT_BUSY 那段：在事件循环线程上等锁 = 整个客户端假死）。 */
+    // builtin：拿锁，拿不到回 AGENT_BUSY
     for (const CommandDef &c : kCommands)
         if (name == c.name)
         {
@@ -211,8 +197,7 @@ std::string handle_command(CoreContext &ctx, Agents &pool, Agent &agent,
             return c.run(env, arg);
         }
 
-    /* prompt：一段要发出去的文字。**不拿锁**——它等价于用户打了一段字，
-     * 而 POST /message 本来就不拿锁（收件箱是个 deque，agent 忙也投得进去）。 */
+    // prompt：等价于用户打了一段字，不拿锁
     for (const PromptCommand &c : agent.commands())
         if (name == c.name)
         {

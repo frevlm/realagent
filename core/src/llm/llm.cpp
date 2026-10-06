@@ -1,9 +1,5 @@
 /*
- * llm.cpp — 协议派发 + SSE 切块 + 计价
- *
- * 这里只放三套协议共有的东西：怎么按空行切 SSE 块、怎么把配置里的协议名解成标签、
- * 怎么把 usage 换成钱。协议自己的知识全在 upstream/ 与 downstream/ 各自的文件里，
- * 本文件一句 if (是不是 anthropic) 都不该有。
+ * llm.cpp — 三套协议共有的部分：协议名、端点校验、派发、SSE 切块、计价
  */
 #include "llm/llm.hpp"
 
@@ -24,20 +20,6 @@ std::optional<Protocol> protocol_from(std::string_view name)
     return std::nullopt;
 }
 
-std::string_view protocol_name(Protocol p)
-{
-    switch (p)
-    {
-        case Protocol::AnthropicMessages:
-            return "anthropic-messages";
-        case Protocol::OpenAiChat:
-            return "openai-chat";
-        case Protocol::OpenAiResponses:
-            return "openai-responses";
-    }
-    return "";
-}
-
 /* ==================== 端点配置校验（ADR-0017）==================== */
 
 std::string endpoint_config_error(const Config &cfg)
@@ -47,8 +29,7 @@ std::string endpoint_config_error(const Config &cfg)
     if (cfg.get("base_url").empty()) missing.push_back("base_url");
     if (cfg.get("model").empty()) missing.push_back("model");
 
-    // 协议名写错与协议名没写是两种错，分开说——"你写的这个我不认识"比
-    // "你没写"多一条信息：他确实写了，只是拼错或记岔了
+    // 写错与没写分开说
     std::string bad_protocol;
     if (missing.empty() && !protocol_from(cfg.get("protocol")))
         bad_protocol = cfg.get("protocol");
@@ -83,13 +64,11 @@ std::string endpoint_config_error(const Config &cfg)
 
 std::string http_status_error(long status, const std::string &body)
 {
-    // 0 = 压根没拿到响应（连不上、被中断掐断在响应头之前）。那是传输层的事，
-    // 由 CURLcode 去解释——在这儿说"HTTP 0"是拿一个不存在的状态码糊弄人
+    // 0 = 没拿到响应，交给 CURLcode 解释
     if (status == 0) return {};
     if (status >= 200 && status < 300) return {};
     std::string msg;
-    // 各家的错误体形状不同，就近捞一层 message：捞得到就说人话，捞不到就把原文给他，
-    // 绝不因为"没读懂错误体"而把一次失败说成成功
+    // 各家错误体形状不同：捞得到 message 就用，捞不到给原文
     if (const nlohmann::json j = nlohmann::json::parse(body, nullptr, false); j.is_object())
     {
         msg = j.value("/message"_json_pointer, std::string());
@@ -103,8 +82,7 @@ std::string http_status_error(long status, const std::string &body)
 
 HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog)
 {
-    // 协议缺失/写错在 Config::missing_required 那一关就拦下了（ADR-0017），
-    // 到这里一定解得出来。解不出来只可能是那一关漏了，宁可炸响也不要静默走某个默认
+    // 调用方已用 endpoint_config_error 把关；解不出来就是 bug，value() 抛出来
     const auto p = protocol_from(cfg.get("protocol"));
     switch (p.value())
     {
@@ -192,7 +170,7 @@ bool SseParser::feed(std::string_view chunk, const EventSink &sink)
         const std::string block = buf_.substr(0, pos);
         buf_.erase(0, pos + sep_len);
 
-        // 状态的类型就是协议身份——每个 State 自带 tag，这里不必再问一次是谁
+        // 每个 State 自带 tag，状态的类型就是协议身份
         const bool ok = std::visit(
             [&](auto &s) {
                 using State = std::decay_t<decltype(s)>;
@@ -201,13 +179,6 @@ bool SseParser::feed(std::string_view chunk, const EventSink &sink)
             st_);
         if (!ok) return false;
     }
-    return true;
-}
-
-bool SseParser::flush(const EventSink &)
-{
-    // 剩余缓冲凑不出完整事件块，丢弃即可
-    buf_.clear();
     return true;
 }
 
@@ -224,9 +195,7 @@ void emit_usage(const UsageCounts &u, const EventSink &sink)
 
 /* ==================== 模型数据表 / 计价 ==================== */
 
-/* 出厂表（ADR-0009）。编译进二进制——它只有几行，为它单开一个安装文件、
- * 再为那个文件单开一条"去哪儿找"的规矩，比表本身长得多。
- * 用户接管版在 ~/.realagent/models.json，存在即整表替换。 */
+/* 出厂模型表（ADR-0009），编译进二进制。~/.realagent/models.json 存在即整表替换。 */
 static constexpr const char *kFactoryModels = R"([
   {"name":"deepseek-v4-flash","owned_by":"deepseek","context":1048576,
    "pricing":{"input":0.14,"output":0.28,"cache_read":0.0028,"cache_write":0}},
@@ -258,8 +227,7 @@ Pricing Pricing::load(const Config &cfg, std::string *error)
     Pricing out;
     for (const nlohmann::json &m : parsed)
     {
-        // 严格：字段缺一即失败，不跳过坏条目、不补默认值。半份表比没有表更难查。
-        // 缺键要先用 find 问出来——const operator[] 撞上缺键是未定义行为
+        // 字段缺一即失败：半份表比没有表更难查
         const auto name = m.find("name");
         const auto owned_by = m.find("owned_by");
         const auto context = m.find("context");
@@ -284,7 +252,6 @@ double Pricing::cost(const std::string &model, const nlohmann::json &usage) cons
     const auto it = pricing_.find(model);
     if (it == pricing_.end() || !usage.is_object()) return 0;
     double total = 0;
-    // 键名两边同源（都是本表的口径），此处不认识具体是哪些键，也不需要认识
     for (const auto &[k, tokens] : usage.items())
     {
         const auto unit = it->second.find(k);

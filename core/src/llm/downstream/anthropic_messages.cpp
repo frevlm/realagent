@@ -21,22 +21,15 @@ namespace realagent {
 
 namespace {
 
-/* usage 对象里的整数字段，缺失/类型不符按 0——各家实现给的字段并不齐全 */
-long long usage_num(const nlohmann::json &u, const char *key)
-{
-    const auto it = u.find(key);
-    return it != u.end() && it->is_number_integer() ? it->get<long long>() : 0;
-}
-
 /* 合并一帧 usage 并发出。绝对值：后到覆盖先到，丢帧不造成永久偏差 */
 void merge_usage(const nlohmann::json &u, UsageCounts &c, const EventSink &sink)
 {
-    if (usage_num(u, "input_tokens") > 0) c.input = usage_num(u, "input_tokens");
-    if (usage_num(u, "output_tokens") > 0) c.output = usage_num(u, "output_tokens");
-    if (usage_num(u, "cache_read_input_tokens") > 0)
-        c.cache_read = usage_num(u, "cache_read_input_tokens");
-    if (usage_num(u, "cache_creation_input_tokens") > 0)
-        c.cache_write = usage_num(u, "cache_creation_input_tokens");
+    if (json_int(u, "input_tokens") > 0) c.input = json_int(u, "input_tokens");
+    if (json_int(u, "output_tokens") > 0) c.output = json_int(u, "output_tokens");
+    if (json_int(u, "cache_read_input_tokens") > 0)
+        c.cache_read = json_int(u, "cache_read_input_tokens");
+    if (json_int(u, "cache_creation_input_tokens") > 0)
+        c.cache_write = json_int(u, "cache_creation_input_tokens");
     emit_usage(c, sink);
 }
 

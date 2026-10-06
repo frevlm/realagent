@@ -108,7 +108,6 @@ static Collected run_parse(const std::vector<std::string> &chunks,
     };
     for (const auto &ch : chunks)
         if (!p.feed(ch, sink)) c.ok = false;
-    p.flush(sink);
     return c;
 }
 

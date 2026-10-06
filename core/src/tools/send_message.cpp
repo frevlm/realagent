@@ -1,7 +1,5 @@
 /*
- * send_message.cpp — send_message 工具的定义。实现在 Executor 里（agent/executor.cpp）
- *
- * 与 spawn 同理：投递要认识别的 agent，那是 agent/ 的知识。
+ * send_message.cpp — send_message 工具的定义。实现在 Executor（它要认识 Agents）。
  */
 #include "tools/tools.hpp"
 

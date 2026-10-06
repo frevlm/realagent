@@ -10,23 +10,12 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// 默认配置树（ADR-0010）：load() 用它打底，settings.json 再逐键覆盖。
-// 只有一个键：permission。这是安全默认，缺了不该放行。
-// 其余键（api_key / small_model / 端点那一束 base_url / model / protocol）没有默认——
-// 缺了 get() 本就返回空串，再写一行 d["x"] = "" 是把编译器免费做的事运行期重做一遍；
-// 端点三键为什么坚持不给默认，见 llm.hpp 与 endpoint_config_error()。
+// 默认配置树（ADR-0010）。没列出的键缺省为空串。
 nlohmann::json defaults()
 {
-    // dangerous 工具执行前怎么裁决：ask 问用户（默认）/ allow-all 一律放行 / deny 一律拒绝
-    //
-    // mcp_http_bridge：`type: "http"` 的 MCP server 靠一个桥接进程说话（ADR-0024 §5）。
-    // **这是一个真默认值**（同 ADR-0016「默认值可以是真的了」），装完即可用；
-    // core 不硬编码包名——那会变成「core 决定去跑一个它没写的程序」，而 MCP 的判据是
-    // 命令由用户在配置里点名。改成空数组 = 不支持 http，遇到报一条人话。
-    //
-    // 占位符 {url} / {name} / {value}。**子数组是「每个 header 重复一次」的那一组**，
-    // 一个 header 都没有时整组不出现——边界写出来，不靠猜（`--header` 与它后面那个
-    // 占位符是一组，这件事从参数本身看不出来）。
+    // permission：ask（问用户）/ allow-all / deny。
+    // mcp_http_bridge：http 型 MCP server 的桥接命令模板（ADR-0024 §5），空数组 = 不支持 http。
+    // 占位符 {url} / {name} / {value}；子数组是每个 header 重复一次的那一组。
     return {{"permission", "ask"},
             {"mcp_http_bridge",
              {"npx", "-y", "mcp-remote", "{url}",
@@ -52,9 +41,7 @@ std::expected<std::optional<nlohmann::json>, std::string> read_settings(const fs
     return std::optional<nlohmann::json>{std::move(j)};
 }
 
-// 逐键覆盖：用户配了哪个键就换哪个键，没提的保留默认值。
-// 配置树是平的（ADR-0016 删掉 plugins 那一节之后再没有嵌套键），所以不必递归——
-// 需要嵌套的那天连着默认树一起加，不提前留机械。
+// 逐键覆盖。配置树是平的，不必递归。
 void merge_into(nlohmann::json &dst, const nlohmann::json &src)
 {
     if (!src.is_object()) return; // settings.json 是合法 JSON 但不是对象：当没配
@@ -132,8 +119,7 @@ bool Config::has(std::string_view key) const
     return settings_.contains(std::string(key));
 }
 
-// 不做档位间回落：small_model 空就是空串。回落会让"我明明配了小模型"与
-// "我没配所以用了主模型"长得一模一样，出账单时才发现区别
+// 档位间不回落：small_model 空就是空串
 std::string Config::model(ModelTier tier) const
 {
     return get(tier == ModelTier::Small ? "small_model" : "model");
@@ -143,19 +129,18 @@ bool Config::persist(std::string_view key, const nlohmann::json &v)
 {
     const fs::path target = settings_path(global_dir());
 
-    // 点对点：读出文件原样，只改这一个键。不 dump 内存树——默认值不进用户的文件。
     auto file = read_settings(target);
     if (!file)
     {
-        // 坏 JSON：拒绝写入。要写就只能整树覆盖，那会抹掉我们没读懂的用户数据（含 api_key）
+        // 坏 JSON 拒绝写入：不能盖掉读不懂的用户数据
         fprintf(stderr, "[config] persist 放弃：%s\n", file.error().c_str());
         return false;
     }
-    nlohmann::json tree = file->value_or(nlohmann::json::object()); // 文件不存在 → 空对象起头
-    tree[std::string(key)] = v;                                     // 只动这一个键，用户配的其余键原样留在文件里
+    nlohmann::json tree = file->value_or(nlohmann::json::object());
+    tree[std::string(key)] = v; // 只动这一个键
     if (!write_atomic(target, tree.dump())) return false;
 
-    // 落盘成功才改内存：失败时内存与文件都没变，不会出现"切了档但没写进去"
+    // 落盘成功才改内存
     std::lock_guard<std::mutex> lk(*mutex_);
     settings_[std::string(key)] = v;
     return true;

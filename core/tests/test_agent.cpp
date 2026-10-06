@@ -22,9 +22,9 @@
 #include <thread>
 
 #include "agent/agent.hpp"
-#include "agent/agent_defs.hpp"
 #include "agent/agents.hpp"
 #include "agent/approval.hpp"
+#include "agent/catalog.hpp"
 #include "agent/context.hpp"
 #include "agent/executor.hpp"
 #include "agent/session.hpp"

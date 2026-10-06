@@ -18,7 +18,7 @@
 #include <fstream>
 #include <string>
 
-#include "agent/skills.hpp"
+#include "agent/catalog.hpp"
 
 namespace fs = std::filesystem;
 using realagent::scan_skills;

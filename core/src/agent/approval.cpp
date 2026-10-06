@@ -22,10 +22,7 @@ Verdict ApprovalCoordinator::await(int agent_id, const std::string &tool_name,
         p->params = params;
         pending_[p->id] = p;
     }
-    // 发 permission_request（入事件队列 → 推送流，事件循环线程投递）
-    // 审批请求不属于任何 agent 的"视图"，它是全局的：TUI 不管正在看哪个 agent 都要弹，
-    // 靠帧里的 agent_id 说明是谁在问。按"当前看着谁"过滤，会让一个没人看的 agent
-    // 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）
+    // 审批是全局的：客户端不管在看哪个 agent 都要弹，帧里的 agent_id 说明是谁在问
     nlohmann::json ev;
     ev["id"] = p->id;
     ev["agent_id"] = agent_id;

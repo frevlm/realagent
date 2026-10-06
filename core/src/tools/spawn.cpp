@@ -1,8 +1,5 @@
 /*
- * spawn.cpp — spawn 工具的定义。实现在 Executor 里（agent/executor.cpp）
- *
- * 它要认识 Agents 才能派生，而 tools/ 在 agent/ 下面，反过来包含就是层级倒挂。
- * 定义仍旧放在这里：LLM 看见的工具清单只有一份，加一个工具就是加一个文件。
+ * spawn.cpp — spawn 工具的定义。实现在 Executor（它要认识 Agents）。
  */
 #include "tools/tools.hpp"
 

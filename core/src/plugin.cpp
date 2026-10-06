@@ -1,8 +1,5 @@
 /*
- * plugin.cpp — 扫描链
- *
- * 这个文件里没有一行「读什么」——那是 skills.cpp 与 mcp/hub.cpp 的事。
- * 它只回答一件事：按什么顺序走过哪几站。
+ * plugin.cpp — 扫描链：按什么顺序走过哪几站（读什么归各扫描器）
  */
 #include "plugin.hpp"
 
@@ -20,13 +17,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
-/* 一处 plugins/ 目录下的全部 plugin，按目录名排序。
- *
- * 排序不是为了好看：`directory_iterator` 的顺序是未指定的，而这个顺序决定了
- * 同名时谁盖谁。同一台机器两次运行给同一份清单，这是最低要求。
- *
- * **任何子目录都是一个 plugin**，不要求它有 `plugin.json`：名片缺了不影响它交出什么，
- * 而一个什么都不交的目录本来就什么都不贡献——不需要为它专门拒绝一次。 */
+/* 一处 plugins/ 目录下的全部子目录，按名排序（directory_iterator 的顺序未指定，
+ * 而它决定同名时谁盖谁）。不要求有 plugin.json。 */
 void scan_plugins_dir(const fs::path &dir, std::vector<PluginRoot> &out)
 {
     std::error_code ec;

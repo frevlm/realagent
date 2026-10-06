@@ -1,14 +1,6 @@
 /*
- * approval.hpp — 审批协调器（权限检查点 ASK 状态机）
- *
- * ADR-0005：core 永远是审批发起方。裁决为 ASK 时，agent 线程阻塞等待用户裁决
- * （绝不按 allow 放行），事件循环线程收 POST /approval-response 后唤醒。
- *
- * 流程：
- *   executor 检查点 → 裁决 ASK → ApprovalCoordinator::await
- *     → 发 permission_request（入事件队列 → 推送流）→ 阻塞（条件变量，30s 超时 deny）
- *     → 事件循环收 /approval-response → respond() 设置裁决 + notify
- *     → agent 线程继续
+ * approval.hpp — 审批：危险工具裁决为 ask 时，agent 线程发 permission_request 并阻塞，
+ * 事件循环线程收到 POST /approval-response 后唤醒它。30 秒没裁决按 deny。
  */
 #pragma once
 
@@ -22,14 +14,14 @@
 
 namespace realagent {
 
-/* 权限裁决。ASK 不是第三种结论，是"这一条得问人"——问完仍然只有放行与拒绝。 */
+/* Ask 不是第三种结论，是"得问人"；问完只有放行与拒绝。 */
 enum class Verdict { Allow,
                      Deny,
                      Ask };
 
 struct PendingApproval {
-    std::string id;   // 请求 ID（permission_request / approval-response 关联）
-    int agent_id = 0; // 谁在问。中断 A 不能掐掉 B 挂着的这一条（ADR-0019）
+    std::string id;
+    int agent_id = 0; // 谁在问：中断 A 不许掐掉 B 的审批
     std::string tool_name;
     std::string params;
     Verdict verdict = Verdict::Deny;
@@ -43,32 +35,25 @@ class ApprovalCoordinator {
     ApprovalCoordinator() = default;
     ~ApprovalCoordinator();
 
-    /* 事件出口：core → 客户端（推送流）。agent 线程经事件队列异步投递（ADR-0002）。 */
     void set_emit(std::function<void(const std::string &type, const std::string &payload)> emit)
     {
         emit_ = std::move(emit);
     }
 
-    /* 此刻有没有客户端能裁决。**没有就别问**——见 executor 的检查点（ADR-0019 §8）。 */
+    /* 有没有客户端能裁决；没有就别问。 */
     void set_online(std::function<bool()> fn) { online_ = std::move(fn); }
     bool online() const { return !online_ || online_(); }
 
-    /* agent 线程：请求审批，阻塞直到裁决。30s 超时按 deny（危险工具默认拒绝）。
-     * agent_id 是提问方的 id，随 permission_request 帧下发——两个 agent 同时问，
-     * 用户得知道是谁在问（ADR-0019 §8）。 */
-    Verdict await(int agent_id, const std::string &tool_name,
-                  const std::string &params);
+    /* agent 线程：发 permission_request，阻塞到裁决或 30 秒超时（deny）。 */
+    Verdict await(int agent_id, const std::string &tool_name, const std::string &params);
 
-    /* 事件循环线程：收到 /approval-response 裁决 */
+    /* 事件循环线程：收到裁决。 */
     void respond(const std::string &id, bool allow);
 
-    /* 取消某个 agent 挂着的全部审批（按 deny 唤醒）。
-     * **按 agent，不是一刀切**：POST /interrupt 现在指名道姓，中断 A 却掐掉 B 正等着的
-     * 那条审批，是把「停下这一个」办成了「全场停摆」（ADR-0019 §8）。 */
+    /* 按 deny 唤醒某个 agent 挂着的全部审批。 */
     void cancel(int agent_id);
 
   private:
-    /* 析构：谁也不剩了，全部按 deny 放掉，别让线程悬在条件变量上 */
     void cancel_all();
 
     std::function<bool()> online_;

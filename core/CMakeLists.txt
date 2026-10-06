@@ -9,7 +9,6 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-find_package(spdlog REQUIRED)
 # macOS 的 libcurl 是系统库（SDK 自带头），FindCURL 会把 SDK usr/include 当 include dir
 # 注入为 isystem——与 brew libc++ 头冲突。因此只取库路径，不用 CURL::libcurl target。
 find_package(CURL REQUIRED)
@@ -17,11 +16,10 @@ find_package(CURL REQUIRED)
 find_path(QUICHE_INCLUDE_DIR quiche.h)
 find_library(QUICHE_LIBRARY NAMES quiche)
 
-# —— core 源码。三套协议各占 upstream/ 与 downstream/ 各一个文件（ADR-0017），
-# llm.cpp 只放派发与共有部分；内置工具在 tools（ADR-0016：从前是 5 个动态库容器）——
 add_library(realagent_core_lib STATIC
   src/config.cpp
   src/plugin.cpp
+  src/proc.cpp
   src/llm/llm.cpp
   src/llm/upstream/anthropic_messages.cpp
   src/llm/upstream/openai_chat.cpp
@@ -42,11 +40,8 @@ add_library(realagent_core_lib STATIC
   src/agent/agents.cpp
   src/agent/command.cpp
   src/agent/session.cpp
-  src/agent/skills.cpp
-  src/agent/commands.cpp
   src/agent/hooks.cpp
-  src/agent/agent_defs.cpp
-  src/agent/frontmatter.cpp
+  src/agent/catalog.cpp
   src/mcp/client.cpp
   src/mcp/hub.cpp
 )
@@ -60,7 +55,6 @@ add_executable(realagent-core
 target_include_directories(realagent-core PRIVATE include ${QUICHE_INCLUDE_DIR})
 target_link_libraries(realagent-core PRIVATE
   realagent_core_lib
-  spdlog::spdlog
   ${CURL_LIBRARIES}
   ${QUICHE_LIBRARY}
 )

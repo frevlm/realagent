@@ -125,8 +125,7 @@ bool Session::read(const std::string &dir, const std::string &id, nlohmann::json
         nlohmann::json parsed = nlohmann::json::parse(line, nullptr, false);
         if (parsed.is_discarded())
         {
-            // 坏行跳过而不是整个会话作废：append-only 文件的末尾可能是断电时写了一半的，
-            // 为了那一行丢掉前面几百条对话是本末倒置
+            // 坏行跳过（断电时写了一半的末行），不让整个会话作废
             fprintf(stderr, "[session] %s:%lld 不是合法 JSON，跳过\n", p.c_str(), lineno);
             continue;
         }
@@ -162,8 +161,7 @@ std::vector<SessionInfo> Session::list(const std::string &dir_arg)
             if (const nlohmann::json m = nlohmann::json::parse(line, nullptr, false); !m.is_discarded())
                 info.title = title_of(m);
         }
-        // file_clock → system_clock：这个 libc++ 没有 clock_cast，用两个时钟的"此刻"
-        // 之差换算。误差在两次 now() 之间，对"最近改过的排前面"绰绰有余。
+        // 这个 libc++ 没有 clock_cast：用两个时钟的"此刻"之差换算
         const auto tp = fs::last_write_time(e.path(), ec);
         info.mtime = 0;
         if (!ec)
@@ -187,9 +185,7 @@ nlohmann::json Session::to_frames(const nlohmann::json &messages)
     nlohmann::json out = nlohmann::json::array();
     if (!messages.is_array()) return out;
 
-    // tool_use_id → 工具名。tool_result 那条消息里没有名字，而 tool_execution_end
-    // 帧要它。tool_use 必然排在它的 result 前面（否则那段历史本身就是坏的），
-    // 所以一边走一边记就够，不需要先扫一遍
+    // tool_use_id → 工具名：tool_execution_end 帧要名字，result 里没有。tool_use 总在前
     std::unordered_map<std::string, std::string> tool_names;
 
     for (const auto &msg : messages)
@@ -206,15 +202,12 @@ nlohmann::json Session::to_frames(const nlohmann::json &messages)
             const std::string type = str(b, "type");
             if (type == "text" && role == "user")
             {
-                // 用户消息的正文走 message_start 的 text 字段。**收件箱里三种来源
-                // 都是 user**（人发的、别的 agent 发的、完成通知），历史里分不出来，
-                // 也不需要分——发信人写在正文里（ADR-0019 §5）
+                // 收件箱三种来源都是 user，发信人写在正文里
                 frame(out, "message_start", nlohmann::json{{"role", "user"}, {"text", str(b, "text")}});
             }
             else if (type == "text")
             {
-                // 实时是一串 delta，回放是一整块。同一个帧类型，客户端那边
-                // 「续写当前这条 assistant 消息」的处理逐字相同
+                // 实时是一串 delta，回放是一整块，帧类型相同
                 frame(out, "message_update", nlohmann::json{{"delta", str(b, "text")}});
             }
             else if (type == "thinking")
@@ -233,8 +226,7 @@ nlohmann::json Session::to_frames(const nlohmann::json &messages)
             {
                 const std::string id = str(b, "tool_use_id");
                 const bool err = b.value("is_error", false);
-                // 工具跑出来的东西实时是一串 tool_output，回放是一整块——同一个帧，
-                // 客户端认领碎片的那段代码原样吃得下
+                // 同上：实时是一串 tool_output，回放是一整块
                 frame(out, "tool_output",
                       nlohmann::json{{"call_id", id},
                                      {"stream", "output"},

@@ -1,8 +1,5 @@
 /*
- * client.cpp — 起进程、收发行、按 id 认领
- *
- * 一行一条 JSON-RPC 消息，这是 stdio 传输的全部帧格式（规范：消息以换行分隔，
- * 消息内不得含换行）。所以"框架"只有一个 split('\n')，剩下的是所有权和线程。
+ * client.cpp — 起进程、收发行、按 id 认领。stdio 传输一行一条 JSON-RPC 消息。
  */
 #include "mcp/mcp.hpp"
 
@@ -25,15 +22,13 @@ namespace realagent {
 namespace {
 
 constexpr int kStartupTimeoutMs = 30000; // 起进程 + 第一次 tools/list
-constexpr int kCallTimeoutMs = 300000;   // 一次 tools/call。拍的数，见 ADR-0023 §9
+constexpr int kCallTimeoutMs = 300000;   // 一次 tools/call（ADR-0023 §9）
 constexpr int kAbortPollMs = 100;        // 多久看一眼中止位
 
-/* 管道四端一律 CLOEXEC。**不设这个，两个 server 就互相吊死**：起 B 的时候 B 继承了
- * A 的管道两端，于是 A 的 stdout 写端永远有人握着——A 退出了，我们的读线程也等不到
- * EOF，join() 不返回。子进程里 dup2 出来的 0/1 不带 CLOEXEC，正是我们要留给它的那两个。 */
+/* 管道一律 CLOEXEC：否则后起的 server 继承前一个的管道，前一个退出时读线程等不到 EOF。 */
 void set_cloexec(int fd) { fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC); }
 
-/* 一串 string → execvp 要的 `char *const[]`（末尾 nullptr）。指向的仍是那串 string。 */
+/* string 数组 → execvp 要的 `char *const[]`（末尾 nullptr） */
 std::vector<char *> to_c_array(std::vector<std::string> &v)
 {
     std::vector<char *> out;
@@ -43,10 +38,7 @@ std::vector<char *> to_c_array(std::vector<std::string> &v)
     return out;
 }
 
-/* 每个请求都要带的那三样（ADR-0023 §5）。
- * protocolVersion 与 clientCapabilities 是必需的，clientInfo 是 SHOULD。
- * **clientCapabilities 是个空对象，而那就是全部的能力故事**——
- * 规范禁止 server 索取客户端没声明的东西。 */
+/* 每个请求都带的 _meta（ADR-0023 §5）。能力为空：server 不会反过来索取任何东西。 */
 nlohmann::json request_meta()
 {
     return {{"io.modelcontextprotocol/protocolVersion", kMcpProtocolVersion},
@@ -55,13 +47,13 @@ nlohmann::json request_meta()
              {{"name", "realagent"}, {"version", "0.1"}}}};
 }
 
-/* JSON-RPC 错误对象 → 一句人话。带上 code：模型改不了它，但看得见"这不是我参数写错了"。 */
+/* JSON-RPC 错误 → 一句带 code 的人话 */
 std::string rpc_error_text(const nlohmann::json &err)
 {
     const std::string msg = err.value("message", std::string("unknown error"));
     const long long code = err.value("code", 0LL);
     std::string s = "MCP error " + std::to_string(code) + ": " + msg;
-    // -32022 会在 data.supported 里列出它说得了哪些版本；那句话是给人看的，一并带上
+    // -32022（版本不符）在 data.supported 里列出 server 支持的版本
     if (const auto d = err.find("data"); d != err.end() && d->contains("supported"))
         s += " (server speaks: " + d->at("supported").dump() + ")";
     return s;
@@ -87,10 +79,8 @@ std::unique_ptr<McpClient> McpClient::start(const nlohmann::json &cfg, std::stri
     }
     for (int fd : {to_child[0], to_child[1], from_child[0], from_child[1]}) set_cloexec(fd);
 
-    /* 子进程的环境：core 自己的，加上配置里的覆盖。**在父进程里拼好**——
-     * fork 之后再 setenv 要 malloc，那不是 async-signal-safe 的。
-     * 子进程里只做一次指针赋值（environ = ...），execvp 用的就是它，
-     * 于是既有 PATH 查找又有自定义环境，两边平台都行。 */
+    /* 环境 = core 自己的 + 配置覆盖。在父进程里拼好：fork 之后 setenv 不是
+     * async-signal-safe 的；子进程只赋一次 environ，execvp 照常做 PATH 查找。 */
     const nlohmann::json &env = cfg.at("env");
     std::vector<std::string> envs;
     for (char **e = environ; *e; ++e)
@@ -101,8 +91,7 @@ std::unique_ptr<McpClient> McpClient::start(const nlohmann::json &cfg, std::stri
         envs.push_back(s);
     }
     for (const auto &[k, v] : env.items()) envs.push_back(k + "=" + v.get<std::string>());
-    /* argv 直接指向 cfg 里的字符串——json 的字符串就是 std::string，取引用不拷贝，
-     * 而 cfg 活得比这次调用久。execvp 的签名是历史遗留的 char* const[]，const_cast 到此为止。 */
+    // argv 直接指向 cfg 里的字符串（cfg 活得比这次调用久）
     std::vector<char *> envp = to_c_array(envs);
     const std::string &command = cfg.at("command").get_ref<const std::string &>();
     std::vector<char *> argv{const_cast<char *>(command.c_str())};
@@ -113,13 +102,10 @@ std::unique_ptr<McpClient> McpClient::start(const nlohmann::json &cfg, std::stri
     const pid_t pid = fork();
     if (pid == 0)
     {
-        /* 子进程：以下都是 async-signal-safe 的 */
-        setpgid(0, 0); // 自成进程组：收尾时一枪打掉整棵子孙树
+        setpgid(0, 0); // 自成进程组：收尾时连子孙一起收
         dup2(to_child[0], STDIN_FILENO);
         dup2(from_child[1], STDOUT_FILENO);
-        /* stderr **不接管**：规范说 server 可以往 stderr 写任何日志，
-         * 且客户端"SHOULD NOT assume stderr output indicates error conditions"。
-         * 让它直接流到 core 的 stderr——想看的人看得见，我们一个字都不解释。 */
+        // stderr 不接管：server 的日志直接流到 core 的 stderr
         close(to_child[0]);
         close(to_child[1]);
         close(from_child[0]);
@@ -146,8 +132,7 @@ std::unique_ptr<McpClient> McpClient::start(const nlohmann::json &cfg, std::stri
     c->out_fd_ = from_child[0];
     c->reader_ = std::thread([p = c.get()] { p->reader_loop(); });
 
-    /* 没有握手。第一句话就是我们真正要的那一句。
-     * 分页跟到底——不跟的话，工具多的 server 只看得见第一页。 */
+    // 没有握手，直接 tools/list，分页跟到底
     nlohmann::json cursor;
     for (;;)
     {
@@ -158,7 +143,7 @@ std::unique_ptr<McpClient> McpClient::start(const nlohmann::json &cfg, std::stri
             c->request("tools/list", std::move(params), nullptr, kStartupTimeoutMs, rerr);
         if (!res)
         {
-            err = rerr; // 是哪个 server 由 hub 冠名——规格里已经没有名字了
+            err = rerr; // 由 hub 冠上名字
             return nullptr;
         }
         if (const auto tools = res->find("tools"); tools != res->end() && tools->is_array())
@@ -174,12 +159,9 @@ McpClient::~McpClient() { shutdown(); }
 
 void McpClient::shutdown()
 {
-    /* 规范给的收尾顺序：关掉它的 stdin，等它自己退，还赖着才动手。
-     * "Servers SHOULD exit promptly when their standard input is closed"——
-     * 这是唯一可移植的优雅退出信号。 */
+    // 规范的收尾顺序：关 stdin 等它自己退，2 秒后 TERM，再 1 秒 KILL
     close(in_fd_);
 
-    /* 等它死，最多 ms 毫秒。退出码没人要——这个进程的产出全在管道里，不在状态码里。 */
     const auto reap = [this](int ms) {
         for (int i = 0; i < ms / 10; ++i)
         {
@@ -197,7 +179,7 @@ void McpClient::shutdown()
             waitpid(pid_, nullptr, 0);
         }
     }
-    /* 进程没了 → stdout 到 EOF → 读线程自己退。不需要 poll、不需要自管道。 */
+    // 进程没了 → stdout 到 EOF → 读线程自己退
     reader_.join();
     close(out_fd_);
 }
@@ -218,19 +200,12 @@ void McpClient::reader_loop()
             buf.erase(0, nl + 1);
             if (line.empty()) continue;
             nlohmann::json msg = nlohmann::json::parse(line, nullptr, false);
-            /* 一行不是 JSON、或者是 JSON 但不是对象（`null`、`3`、`"hi"` 都是合法 JSON），
-             * 就不是 MCP 消息。**必须在这里挡住**：往下的 find/迭代器操作对非对象是要抛的，
-             * 而这是一条线程，异常逃出去就是整个 core `terminate`——
-             * 一个第三方进程吐错一行不该有这个能耐。 */
+            // 不是 JSON 对象就不是 MCP 消息。必须挡住：下面对非对象会抛，线程里抛出去就是 terminate
             if (msg.is_discarded() || !msg.is_object()) continue;
-            /* **按 id 认领，不按到达顺序。** 通知（没有 id）和响应共用这一条流，
-             * 谁先到不代表谁是谁的答案。我们没订阅任何通知（不发 subscriptions/listen），
-             * 所以通知一律丢掉。 */
+            // 按 id 认领；没有 id 的是通知，我们没订阅任何通知，丢掉
             const auto id = msg.find("id");
             if (id == msg.end() || !id->is_number_unsigned()) continue;
-            /* 先把 id 取成一个值再动 msg。**不要合成一句** `done_[id->get<uint64_t>()]
-             * = std::move(msg)`：右操作数先求值，msg 会在左边那个 id->get() 之前被移空，
-             * 迭代器落在 null 上抛 invalid_iterator。 */
+            // 先取出 id 再 move msg：合成一句的话右边先求值，迭代器会悬空
             const uint64_t rid = id->get<uint64_t>();
             std::lock_guard<std::mutex> lk(mtx_);
             done_[rid] = std::move(msg);
@@ -239,7 +214,7 @@ void McpClient::reader_loop()
     }
     std::lock_guard<std::mutex> lk(mtx_);
     closed_ = true;
-    cv_.notify_all(); // 还在等的人该醒了，等下去也等不到
+    cv_.notify_all();
 }
 
 void McpClient::send_line(const nlohmann::json &msg)
@@ -291,16 +266,12 @@ std::optional<nlohmann::json> McpClient::request(const std::string &method, nloh
                 err = "MCP server 超时未回应";
                 break;
             }
-            /* 分片等：中止位是别的线程置的，没有可等的条件变量。100ms 一看——
-             * 这是人按 Esc 的尺度，不是热路径。 */
+            // 分片等：中止位没有可等的条件变量
             cv_.wait_until(lk, std::min(deadline, now + std::chrono::milliseconds(kAbortPollMs)));
         }
         if (reply.is_null())
         {
-            /* 放弃了。按规范办：发 notifications/cancelled，然后**无视迟到的响应**。
-             * 不杀进程——连接是进程级共享的，杀了会把别的 agent 一起弄断。
-             * 放弃的原因在上面就定下了，不留给调用方去重新猜一次：那要再读一遍
-             * 同一个原子量的另一个时刻，超时之后按下的 Esc 会被报成「中止」。 */
+            // 放弃：发 notifications/cancelled，无视迟到的响应，不杀共享的进程
             done_.erase(id);
         }
     }
@@ -312,8 +283,6 @@ std::optional<nlohmann::json> McpClient::request(const std::string &method, nloh
         return std::nullopt;
     }
 
-    /* 到这儿为止，调用方拿到的一定是一个已经确认过的 complete result——
-     * 「有 error 就转人话」「resultType 只认 complete」这两条判断只写这一处。 */
     if (const auto e = reply.find("error"); e != reply.end())
     {
         err = rpc_error_text(*e);
@@ -325,10 +294,7 @@ std::optional<nlohmann::json> McpClient::request(const std::string &method, nloh
         err = "响应里既没有 result 也没有 error";
         return std::nullopt;
     }
-    /* resultType 只认 complete。input_required 与 task 出不来——前者要 client 声明能力，
-     * 后者要声明 tasks 扩展，我们两个都没声明。其余一律非法（规范原话：
-     * "A resultType of any value unrecognized by the client MUST be considered invalid"）。
-     * 旧纪元的 server 没有这个字段，而旧纪元我们本来就不支持。 */
+    // 只认 complete：我们没声明能力与 tasks 扩展，别的值按规范一律非法
     if (res->value("resultType", std::string()) != "complete")
     {
         err = "resultType=" + res->value("resultType", std::string("(缺失，多半是旧纪元的 server)"));
@@ -346,8 +312,7 @@ nlohmann::json McpClient::call(const std::string &name, const nlohmann::json &ar
     std::string err;
     const auto res = request("tools/call", std::move(params), abort, kCallTimeoutMs, err);
     if (!res) return tool_fail(err);
-    /* 原样交出去。**不投影、不压平**——能不能带图片是端点协议的事，
-     * 那个决定属于 llm/upstream/<协议>.cpp，不属于这里（ADR-0023 §3）。 */
+    // 原样交出，不压平：能不能带图片由 llm/upstream 决定
     nlohmann::json out;
     out["content"] = res->value("content", nlohmann::json::array());
     out["isError"] = res->value("isError", false);
