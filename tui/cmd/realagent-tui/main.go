@@ -938,7 +938,6 @@ func main() {
 	}
 	c := client.New(addr)
 	// 退出时通知 core（ADR-0021）
-	defer c.Close()
 	defer c.CloseGroup()
 
 	// core 不自动建 agent：workdir 由客户端给，它知道用户站在哪

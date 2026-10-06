@@ -16,8 +16,6 @@ func main() {
 
 	a := client.New("127.0.0.1:12345")
 	b := client.New("127.0.0.1:12345")
-	defer a.Close()
-	defer b.Close()
 
 	if err := a.CreateAgent(wd); err != nil {
 		fmt.Println("a 建 agent 失败:", err)

@@ -1,9 +1,7 @@
 /*
- * main.cpp — realagent core 入口：读配置、建 agent 池、挂路由、跑事件循环
+ * main.cpp — realagent core 入口：读配置、建 agent 池、挂路由、监听
  */
 #include <cstdio>
-#include <deque>
-#include <mutex>
 #include <string>
 
 #include "agent/agents.hpp"
@@ -11,7 +9,7 @@
 #include "agent/session.hpp"
 #include "config.hpp"
 #include "mcp/mcp.hpp"
-#include "server/quic_server.hpp"
+#include "server/server.hpp"
 
 using namespace realagent;
 using nlohmann::json;
@@ -24,8 +22,6 @@ json parse_body(const std::string &body)
     json j = json::parse(body, nullptr, false);
     return j.is_object() ? j : json::object();
 }
-
-using EventQueue = std::deque<std::pair<std::string, std::string>>;
 
 } // namespace
 
@@ -46,13 +42,10 @@ int main()
 
     McpHub mcp_hub;
 
-    // agent 线程 emit 入队，事件循环线程出队推送（quiche 不是线程安全的）
-    std::mutex ev_mtx;
-    EventQueue ev_queue;
+    Server server;
     CoreContext ctx{.config = &cfg, .pricing = &pricing, .mcp = &mcp_hub};
-    ctx.emit_fn = [&](const std::string &type, const std::string &payload) {
-        std::lock_guard<std::mutex> lk(ev_mtx);
-        ev_queue.emplace_back(type, payload);
+    ctx.emit_fn = [&server](const std::string &type, const std::string &payload) {
+        server.push_event(type, payload);
     };
 
     // 端点没配齐也照常起：这段话会原样回给每一条 POST /message，出现在用户眼前
@@ -63,9 +56,6 @@ int main()
     approval.set_emit(ctx.emit_fn);
     Agents pool(ctx, approval);
 
-    const std::string home = getenv_or("HOME", ".");
-    QuicServer server({.cert_file = home + "/.realagent/cert.pem",
-                       .key_file = home + "/.realagent/key.pem"});
     approval.set_online([&server] { return server.has_client(); });
 
     /* 按 agent_id 找到 agent 再交给 f；找不到回错误。 */
@@ -78,7 +68,7 @@ int main()
             return f(*a, j);
         };
     };
-    /* 事件循环线程上不等锁：agent 正在跑就当场回 AGENT_BUSY。 */
+    /* 请求那一队里不等锁：agent 正在跑就当场回 AGENT_BUSY。 */
     const auto when_idle = [&with_agent](auto f) -> Handler {
         return with_agent([f](Agent &a, const json &j) {
             auto lk = a.try_lock();
@@ -150,22 +140,15 @@ int main()
 
     server.route("GET", "/statusline", [&ctx](const std::string &) { return statusline_payload(ctx).dump(); });
 
-    // 每圈：状态栏变了就推一帧，再把事件队列倒进推送流
+    // 状态栏变了就推一帧。配置只在请求里改（/model），所以每条请求之后比一次就够
     std::string last_statusline = statusline_payload(ctx).dump();
-    server.on_tick([&] {
+    server.after_request([&] {
         if (std::string cur = statusline_payload(ctx).dump(); cur != last_statusline)
         {
             last_statusline = std::move(cur);
             server.push_event("statusline", last_statusline);
         }
-        EventQueue batch;
-        {
-            std::lock_guard<std::mutex> lk(ev_mtx);
-            batch.swap(ev_queue);
-        }
-        for (auto &[t, p] : batch) server.push_event(t, p);
     });
 
-    server.run();
-    return 0;
+    return server.run(12345) ? 0 : 1;
 }

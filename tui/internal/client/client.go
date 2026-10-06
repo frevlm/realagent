@@ -1,28 +1,23 @@
-// Package client 封装 core 的 QUIC/HTTP3 端点（PROTOCOL.md）
+// Package client 封装 core 的端点：请求走 HTTP，推送走 WebSocket（PROTOCOL.md）
 package client
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
+	"github.com/gorilla/websocket"
 )
 
-// Client 是 core 的 QUIC/HTTP3 客户端
+// Client 是 core 的客户端
 type Client struct {
-	hc     *http.Client // 请求-响应端点，带超时
-	stream *http.Client // 推送流：长连接，不能有整体超时
-	rt     *http3.Transport
-	url    string
+	hc   *http.Client
+	addr string
 
 	agentID  int    // 当前在跟哪个 agent 说话；动 agent 的端点都要指名
 	clientID string // 本进程一个，不落盘
@@ -48,14 +43,11 @@ type Command struct {
 
 // New 创建客户端。addr 形如 "127.0.0.1:12345"。
 func New(addr string) *Client {
-	rt := &http3.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return &Client{
-		hc:       &http.Client{Transport: rt, Timeout: 120 * time.Second},
-		stream:   &http.Client{Transport: rt},
-		rt:       rt,
-		url:      "https://" + addr,
+		hc:       &http.Client{Timeout: 120 * time.Second},
+		addr:     addr,
 		clientID: hex.EncodeToString(b[:]),
 	}
 }
@@ -128,7 +120,7 @@ func (c *Client) do(method, path string, body, out any) error {
 		data, _ := json.Marshal(body)
 		rd = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(method, c.url+path, rd)
+	req, err := http.NewRequest(method, "http://"+c.addr+path, rd)
 	if err != nil {
 		return fmt.Errorf("构造请求失败: %w", err)
 	}
@@ -213,34 +205,28 @@ func (c *Client) CloseGroup() error {
 	return err
 }
 
-func (c *Client) Close() { c.rt.Close() }
-
 // Event 是推送流中的一条事件
 type Event struct {
 	Type    string
 	Payload string // JSON
 }
 
-// SubscribeEvents 订阅 /events，事件持续写进 ch；流断开时关闭 ch 返回。阻塞调用。
+// SubscribeEvents 连上 /events，事件持续写进 ch；连接断开时关闭 ch 返回。阻塞调用。
 func (c *Client) SubscribeEvents(ch chan<- Event) error {
 	defer close(ch)
-	resp, err := c.stream.Get(c.url + "/events?client_id=" + c.clientID)
+	ws, _, err := websocket.DefaultDialer.Dial("ws://"+c.addr+"/events?client_id="+c.clientID, nil)
 	if err != nil {
 		return fmt.Errorf("订阅事件流失败: %w", err)
 	}
-	defer resp.Body.Close()
-
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 64*1024), 16*1024*1024) // 一帧可能很大（工具输出、长正文）
-	var evType string
-	for sc.Scan() {
-		line := sc.Text()
-		if t, ok := strings.CutPrefix(line, "event: "); ok {
-			evType = t
-		} else if p, ok := strings.CutPrefix(line, "data: "); ok {
-			ch <- Event{Type: evType, Payload: p}
-			evType = ""
+	defer ws.Close()
+	for {
+		var f struct {
+			Event string          `json:"event"`
+			Data  json.RawMessage `json:"data"`
 		}
+		if err := ws.ReadJSON(&f); err != nil {
+			return err
+		}
+		ch <- Event{Type: f.Event, Payload: string(f.Data)}
 	}
-	return sc.Err()
 }

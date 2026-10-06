@@ -14,19 +14,19 @@ $(NINJA):
 
 all: core tui        ## 构建全部（core + TUI），默认目标
 
-core: $(NINJA)       ## 构建 core（C++ QUIC/HTTP3 服务）
+core: $(NINJA)       ## 构建 core（C++ WebSocket 服务）
 	cmake --build $(BUILD_DIR) --target realagent-core
 
 tui: $(NINJA)        ## 构建 TUI（Go + Bubble Tea）
 	cmake --build $(BUILD_DIR) --target realagent-tui
 
-# core 是 UDP(QUIC) 服务，TCP 端口探测不到，故用启动日志当就绪信号。
+# 用启动日志当就绪信号。
 # 注意：recipe 里不能写 shell 注释——续行会让注释吞掉整条命令。
 dev: all             ## 开发模式：后台起 core + 前台跑 TUI，TUI 退出时自动清理 core
 	@$(CORE) > $(BUILD_DIR)/core.log 2>&1 & \
 	core_pid=$$!; \
 	trap 'kill $$core_pid 2>/dev/null' INT TERM; \
-	for i in $$(seq 1 50); do grep -q "QUIC/HTTP3" $(BUILD_DIR)/core.log 2>/dev/null && break; kill -0 $$core_pid 2>/dev/null || break; sleep 0.1; done; \
+	for i in $$(seq 1 50); do grep -q "运行在 127.0.0.1" $(BUILD_DIR)/core.log 2>/dev/null && break; kill -0 $$core_pid 2>/dev/null || break; sleep 0.1; done; \
 	$(TUI); \
 	rc=$$?; \
 	kill $$core_pid 2>/dev/null; \

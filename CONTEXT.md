@@ -241,7 +241,7 @@ Loop 向客户端发布的生命周期消息。典型序列：
 
 事件是**异步事件流**的一部分（ADR-0002）：生产方与消费方解耦。异步引擎的动机是**多 agent 并发编排**，而非单 agent 工具并行。
 
-出口有两条，**都不是订阅**：agent 线程 `emit` 入队、事件循环线程 flush 到推送流（→ 客户端）；agent 跑完时沿自己的入边投递完成通知（→ 其他 agent 的[[收件箱（Inbox）]]）。
+出口有两条，**都不是订阅**：agent 线程 `emit` 直接写给每一条客户端连接（→ 客户端，[[ADR-0026]]）；agent 跑完时沿自己的入边投递完成通知（→ 其他 agent 的[[收件箱（Inbox）]]）。
 
 > 2026-08-28 修订：原文写「出口只有一个……没有扇出、没有订阅者」。第二条出口是多 agent 带来的，但它**不是把订阅者请回来**——没有人在别人身上注册回调，投递的依据是[[边（Edge）]]，而边是投递方自己那头的一条数据。[[ADR-0016]] 赶走的是插件在 core 里登记的那种订阅表，那东西仍然不存在。
 
@@ -564,6 +564,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - core 第三方依赖：libcurl + spdlog 两个（FTXUI 属 TUI 层）。
   - 实况注（2026-08-28）：需要 find_package 的是**三个**——libcurl、spdlog、quiche（`core/CMakeLists.txt`）。JSON 是 nlohmann/json 3.12.0，单头文件 vendored 在 `core/include/json.hpp`，不必安装、不必链库。括号里的 FTXUI 是 ADR-0007 之前"TUI 也用 C++"方案的残留，本项目**没有也不会**依赖它（TUI 是 Go + Bubble Tea）。
   - 实况注（2026-10-06）：spdlog 从未被任何源文件使用（日志一直是 `fprintf(stderr, ...)`），已从 `core/CMakeLists.txt` 删除。core 的第三方依赖现在是 **libcurl + quiche** 两个。
+  - 实况注（2026-10-06）：quiche 换成 cpp-httplib（FetchContent 钉 v0.57.1，header-only，[[ADR-0026]]）。core 的第三方依赖是 **libcurl + cpp-httplib**。
 - TUI：Go + Bubble Tea（ADR-0007）。参考 claude code / codex 客户端外观，**有状态栏**（见 [[Statusline（状态栏）]]）。原定"无状态栏"，后反转并已完整实现（core 侧 `GET /statusline` + `statusline` 帧，TUI 侧 `tui/cmd/realagent-tui/statusline.go`）。ADR-0007 正文第 34 行仍写着"无状态栏（用户明确）"，紧跟其后的实况注（2026-08-16）已注明该条被推翻——**正文与注不一致是有意保留的**：ADR 记录的是当时怎么想的，注记录的是后来发生了什么。
 - TUI 渲染：~~历史归终端管，不进 altscreen（ADR-0008）~~ —— **已推翻**（[[ADR-0020]]，2026-08-28）。进 altscreen + 自建 viewport；**不开 mouse mode**（开了终端原生选中/复制会整个失效，bubbletea issue #162），滚动绑键盘、滚轮靠终端的 alternate scroll 转方向键。行不常驻内存，从会话记录读、动态渲染，改宽可重排。新增 `GET /session`（兼容 `GET /history`），**返回事件帧序列**（不是抽象对话消息）——TUI 复用同一个渲染器，不写第二份。
   - 接缝在「最后一条已落盘的消息」：历史走端点，正在流的走事件帧。subagent 的历史同样读得到（它落在 `sessions/sub/`，只是不进会话清单）。
@@ -604,10 +605,10 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 会话目录不是配置项：`.realagent/sessions` 是 core 自己的落盘路径（`Config::session_dir()`，相对 cwd），写死在 core 里，settings.json 写它不生效。
 - 斜杠命令：全部 core 内置——`/new` `/resume` `/model`（`handle_command`，见 `core/src/main.cpp`）。`/model` 无参列[[模型数据表]]的清单，带名切主模型并写回 settings.json；只认表里的模型——交互式选择就该从已知的里挑。
   - 实况注（2026-08-25）：`/plugins` 与 `/provider` 随 [[ADR-0016]] 删除。`/quit` 与 `/statusline` **不归 core**——退出的是客户端进程，展示偏好是客户端的事，两者都是 TUI 本地命令。插件可注册命令这条从设计到废除，实际提供过命令的插件数是 0。
-- 通信协议：见 `docs/PROTOCOL.md`（可靠流请求-响应 + 推送流，全可靠 + 0-RTT）。
-- 架构：core 为常驻服务，客户端（TUI/未来 gui）通过 **QUIC/HTTP3** 连接（ADR-0006）。REST 语义（POST /message、POST /approval-response 等）；推送流为 HTTP/3 长生命周期单向流（SSE 语义），**全可靠**（增量与事件无差别，QUIC 可靠流原生保证，无自建确认机制）。0-RTT 快握手。支持公网部署。
-- QUIC 库：core 用 **Cloudflare quiche**（QUIC + HTTP/3 一体，`core/CMakeLists.txt:17-19`）；TUI 用 quic-go。msquic 于 2026-08-09 被弃（纯传输层无 H3 语义），ADR-0006 当时记的替代品是 ngtcp2 + nghttp3，**但那套实现满足不了需求，最终换成 quiche**（补记于 ADR-0006 实况注，2026-08-28；具体是哪一条不满足未留下记录）。
-- 出站 Provider 请求：core 用 libcurl（HTTP/1.1 客户端，请求 DeepSeek）；入站客户端通信走 QUIC。
+- 通信协议：见 `docs/PROTOCOL.md`（HTTP/1.1 请求-响应 + WebSocket 推送，全可靠）。
+- 架构：core 为常驻服务，只听 `127.0.0.1:12345`（ADR-0006 + ADR-0026）。请求是普通 HTTP（POST /message、POST /approval-response 等）；推送走 `GET /events` 的 WebSocket，**全可靠**（增量与事件无差别，TCP 保证，无自建确认机制）。远程时 TLS 放在前面的反向代理上。
+- 服务端库：core 用 **cpp-httplib**（照搬 realontext 的 Relay）；TUI 用 net/http + gorilla/websocket。2026-08 到 2026-10 用的是 QUIC/HTTP3（quiche + quic-go），弃用理由见 ADR-0026。
+- 出站 Provider 请求：core 用 libcurl，按 `protocol` 配置说 HTTP + SSE；与入站客户端通信无关。
 - 工具结果：一个 json，形状 `{"status": <int, 0=成功>, "output": <string, 给模型看的文本>}`；`Executor::execute` 再加一个 `"interrupted"` 键（core 本次执行期间提没提过中止）。没有 `ToolResult`/`ExecResult` 结构体——工具本来就在拼 json，两个字段的信封是多余的。
 - JSON 实现：nlohmann/json 3.12.0，单头文件逐字节 vendored 在 `core/include/json.hpp`，类型就是 `nlohmann::json`——**core 不包壳**。链式 `a["b"]["c"]` 与隐式转换是库自带的；读不受控的输入用 `find()` / `value(key, 默认值)`（const `operator[]` 撞上缺键是未定义行为），解析用 `parse(text, nullptr, false)` + `is_discarded()`。
 - DeepSeek 接入：端点 `https://api.deepseek.com/anthropic`，模型 `deepseek-v4-flash`（或 `deepseek-v4-pro`），API key 见 platform.deepseek.com。工具调用与流式完整支持；`cache_control` 被忽略（验证首版无需 vendor 层）。
@@ -617,7 +618,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 
 ```
 realagent/                  # 主仓库（core + tui + docs）
-├── core/                   # C++ QUIC/HTTP3 服务（ADR-0006）
+├── core/                   # C++ 常驻服务，HTTP + WebSocket（ADR-0006、ADR-0026）
 │   ├── include/            #   公共头：config.hpp + vendored json.hpp / fkYAML.hpp + agent/ llm/ tools/ server/
 │   ├── src/
 │   │   ├── llm/            #   一次 LLM 调用：造请求 + SSE 解析 + 计价（llm.cpp）
