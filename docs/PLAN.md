@@ -208,7 +208,7 @@ M6 TUI              → M7 集成与测试
 
 **交付物**
 - Go + Bubble Tea 界面（参考 claude code / codex 客户端）
-- 状态栏（输入框下方常驻栏，`🤖 model | 📁 dir | 🌿 git`）：core 侧 `GET /statusline` 端点 + `statusline` 推送帧（见 docs/PROTOCOL.md 端点表与帧表），TUI 侧 model 在 tui/cmd/realagent-tui/main.go:92、渲染与本地 `/statusline` 配置命令在 tui/cmd/realagent-tui/statusline.go。
+- 状态栏（输入框下方常驻栏，cometix 格式 `🤖 model | 📁 dir | 🌿 branch ✓`）：core 侧 `GET /statusline` 端点 + `statusline` 推送帧（见 docs/PROTOCOL.md 端点表与帧表），TUI 侧 model 在 tui/cmd/realagent-tui/main.go:92、渲染与本地 `/statusline` 配置命令在 tui/cmd/realagent-tui/statusline.go。
   **此项是对原计划的反转**：本文与 CONTEXT.md 原都写「无状态栏」（CONTEXT.md 已于 2026-08-16 订正）。**反转无 ADR 记录，且与现存 ADR 冲突**——docs/adr/0007-tui-go-bubbletea.md:34 至今写着「**无状态栏**（用户明确）」，没有任何 ADR 取代它，而代码已完整实现状态栏。理由未知，不在此代拟。
 - quic-go 客户端
 - 消息流渲染（流式打字效果，由推送流帧到达驱动）

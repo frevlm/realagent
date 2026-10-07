@@ -236,6 +236,10 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		m.sl.model = v.model
 		return m, nil
 
+	case gitMsg:
+		m.sl.branch, m.sl.gitMark = v.branch, v.mark
+		return m, nil
+
 	case eventMsg:
 		cmd := m.handleEvent(client.Event(v))
 		return m, tea.Batch(cmd, waitEventCmd(m.eventsCh))
@@ -709,6 +713,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.closeLine()
 		m.awaiting = false
 		m.busy.stop()
+		return fetchGitCmd // agent 可能改了文件，重取 git 标记
 
 	case "message_end":
 		m.closeLine()

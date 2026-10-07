@@ -94,7 +94,7 @@ core 只听 `127.0.0.1:12345`，不加密。将来上远程，TLS 放在前面�
 - **变了才推**：core 每处理完一条请求比对一次当前载荷，不同才发一帧，相同不发（配置只在请求里改）。
 - **谁改的不重要**：载荷本身就是信号。改配置的代码路径不需要通知任何人，客户端也不需要知道是谁改的。
 - **不做配置文件热重载**（ADR-0010）：core 启动时读一次 `settings.json`，之后不再看它。用户手改配置需重启 core 才生效，改模型的唯一在线途径是 `/model <name>`。
-- **当前客户端只消费 `model`**：TUI 的 `client.Statusline` 三个键都解析（tui/internal/client/client.go:203-206），但传给渲染的 `statusMsg` 只带 `model`（tui/cmd/realagent-tui/statusline.go:89-91）；状态栏另两段 dir 与 git 是 TUI 本地算的，不来自本帧。`owned_by` / `context` 因此目前无人渲染。协议保留这两个键——载荷形状是 core 侧的事实，客户端渲染多少是客户端的事。
+- **当前客户端只消费 `model`**：TUI 的 `client.Statusline` 三个键都解析（tui/internal/client/client.go:120-124），但传给渲染的 `statusMsg` 只带 `model`（tui/cmd/realagent-tui/statusline.go:72-75）；状态栏另两段 dir 与 git 是 TUI 本地算的，不来自本帧。`owned_by` / `context` 因此目前无人渲染。协议保留这两个键——载荷形状是 core 侧的事实，客户端渲染多少是客户端的事。
 
 ### tool_output 帧
 

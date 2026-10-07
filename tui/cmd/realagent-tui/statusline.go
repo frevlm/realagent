@@ -1,12 +1,14 @@
-// 状态栏（输入框下方，参考本地 claude code statusline / ccline cometix 主题）：
-// model | directory | git，一次性拿数据，进程存活期内不重复拉取——
-// 三者在一次会话里基本不变，没必要为罕见的分支切换常驻一个刷新循环。
+// 状态栏（输入框下方，格式照本地 claude code statusline / ccline cometix 主题）：
+// model | directory | git。模型由 core 推帧更新；目录启动拿一次；
+// git 启动拿一次，每次 agent_end 再拿一次——干净/脏标记随 agent 改文件而变，
+// 收工是文件改完的时刻，不需要常驻刷新循环。
 //
 // 显示什么、图标用 emoji 还是 nerd font 由 /statusline 命令配置（本文件末尾），
 // 纯客户端状态——core 不认展示偏好，不走网络、不持久化，进程重启即复原默认值。
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,15 +19,14 @@ import (
 	"realagent/tui/internal/client"
 )
 
-// statuslineSep 段间分隔符，跟本地 ccline 配置一致
-const statuslineSep = " | "
-
+// 配色同 cometix：图标常规、文字加粗，分隔符白色（c16 = 7）
 var (
-	slModelIconStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+	slSepStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	slModelIconStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 	slModelTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
-	slDirIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+	slDirIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	slDirTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
-	slGitIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	slGitIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	slGitTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
 )
 
@@ -48,9 +49,10 @@ func pickIconSet() string {
 
 // statusline 是状态栏的数据源 + 展示偏好
 type statusline struct {
-	model  string // GET /statusline 拿到的模型名；空 = 未知，段隐藏
-	dir    string // 进程 cwd 的 basename
-	branch string // 当前 git 分支；非 git 仓库则空，段隐藏
+	model   string // GET /statusline 拿到的模型名；空 = 未知，段隐藏
+	dir     string // 进程 cwd 的 basename
+	branch  string // 当前 git 分支；非 git 仓库则空，段隐藏
+	gitMark string // "✓" 干净 / "●" 有改动；git status 失败则空，不显示
 
 	showModel, showDir, showGit bool
 	iconSet                     string // "emoji" | "nerd"
@@ -61,7 +63,7 @@ func newStatusline() statusline {
 	if wd, err := os.Getwd(); err == nil {
 		sl.dir = filepath.Base(wd)
 	}
-	sl.branch = gitBranch()
+	sl.branch, sl.gitMark = gitInfo()
 	return sl
 }
 
@@ -72,17 +74,34 @@ func (sl statusline) icons() statuslineIcons {
 	return emojiIcons
 }
 
-// gitBranch 取当前分支名；非仓库或命令失败返回空（PROTOCOL.md 一贯原则：无数据不伪造）
-func gitBranch() string {
+// gitInfo 取当前分支名与工作区标记；非仓库或命令失败返回空（PROTOCOL.md 一贯原则：无数据不伪造）
+func gitInfo() (branch, mark string) {
 	out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	branch := strings.TrimSpace(string(out))
+	branch = strings.TrimSpace(string(out))
 	if branch == "" || branch == "HEAD" {
-		return ""
+		return "", ""
 	}
-	return branch
+	out, err = exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return branch, ""
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return branch, "✓"
+	}
+	return branch, "●"
+}
+
+// gitMsg 携带 agent_end 后重取的 git 信息
+type gitMsg struct {
+	branch, mark string
+}
+
+func fetchGitCmd() tea.Msg {
+	branch, mark := gitInfo()
+	return gitMsg{branch: branch, mark: mark}
 }
 
 // statusMsg 携带 GET /statusline 的拉取结果
@@ -111,12 +130,13 @@ func (sl statusline) render() string {
 		segs = append(segs, slDirIconStyle.Render(icons.dir)+" "+slDirTextStyle.Render(sl.dir))
 	}
 	if sl.showGit && sl.branch != "" {
-		segs = append(segs, slGitIconStyle.Render(icons.git)+" "+slGitTextStyle.Render(sl.branch))
+		text := sl.branch
+		if sl.gitMark != "" {
+			text += " " + sl.gitMark
+		}
+		segs = append(segs, slGitIconStyle.Render(icons.git)+" "+slGitTextStyle.Render(text))
 	}
-	if len(segs) == 0 {
-		return ""
-	}
-	return strings.Join(segs, statuslineSep)
+	return strings.Join(segs, slSepStyle.Render(" | "))
 }
 
 // ==================== /statusline 命令（纯本地，不经 core） ====================

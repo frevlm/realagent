@@ -98,3 +98,26 @@ func TestStatuslineRenderHidesDisabledOrEmptySegments(t *testing.T) {
 		t.Errorf("全无数据应返回空串，got %q", got)
 	}
 }
+
+// git 段带工作区标记（cometix 格式）：分支名后跟 ✓ / ●；拿不到标记就只显示分支
+func TestStatuslineRenderGitMark(t *testing.T) {
+	sl := testStatusline()
+	sl.gitMark = "●"
+	if got := sl.render(); !strings.Contains(got, "main ●") {
+		t.Errorf("git 段应含 \"main ●\": %q", got)
+	}
+	sl.gitMark = ""
+	if got := sl.render(); !strings.Contains(got, "main") {
+		t.Errorf("无标记时仍应渲染分支: %q", got)
+	}
+}
+
+// agent_end 后重取的 git 信息覆盖写进状态栏
+func TestStatuslineGitMsgUpdates(t *testing.T) {
+	m := testModel()
+	m.sl = testStatusline()
+	m, _ = m.update(gitMsg{branch: "feat", mark: "●"})
+	if m.sl.branch != "feat" || m.sl.gitMark != "●" {
+		t.Errorf("gitMsg 后 branch/mark = %q/%q, want feat/●", m.sl.branch, m.sl.gitMark)
+	}
+}
