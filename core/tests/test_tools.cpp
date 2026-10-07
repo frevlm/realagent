@@ -10,6 +10,7 @@
  *   - read：带 anchor 的输出、分页、输出上限、超大文件（ADR-0018）
  *   - edit：一个操作四种用法 / 先全校验再写 / 陈旧 anchor 拒绝 / 多文件遇错即停
  *   - bash：stdout 回传、非零退出码即错误、缺参数
+ *   - search：命中、没命中、正则写错、单引号转义（没装 realontext 就跳过）
  *   - 权限（ADR-0005 / ADR-0016）：allow-all 放行、deny 拒绝、ask 真等裁决、
  *     认不出的值按 ask 处理（写错配置该多问一句，不该多放一次行）
  *   - 中止（ADR-0002 R8）：执行前的中止标记撞得上，跑着的 bash 打得断，reset 抹得掉
@@ -137,12 +138,18 @@ int main()
     {
         // 一个工具一个文件，read/edit/bash 自带实现，spawn/send_message 由 Executor 实现——
         // 定义都在同一张表里，LLM 看见的清单只有一份（ADR-0019）
-        CHECK(tool_defs().size() == 5, "五个工具");
+        CHECK(tool_defs().size() == 6, "六个工具");
         CHECK(find_tool("spawn") && find_tool("send_message"), "两个 agent 级工具在同一张表里");
         const nlohmann::json *r = find_tool("read");
         const nlohmann::json *e = find_tool("edit");
         const nlohmann::json *b = find_tool("bash");
         CHECK(r && !tool_dangerous(*r), "read 是只读工具，不触发权限检查点");
+        const nlohmann::json *s = find_tool("search");
+        CHECK(s && !tool_dangerous(*s), "search 是只读工具，不触发权限检查点");
+        CHECK(s && (*s)["description"].get<std::string>().find(R"("truncate_name\(")") != std::string::npos &&
+                  (*s)["input_schema"]["properties"]["pattern"]["description"].get<std::string>().find(
+                      R"(`truncate_name\(`)") != std::string::npos,
+              "模型看见的例子是 rg 正则 truncate_name\\(，转义没多也没少");
         CHECK(e && tool_dangerous(*e), "edit 危险");
         CHECK(b && tool_dangerous(*b), "bash 危险");
         // 出口不再是一个工具：收工归小模型判（ADR-0025），模型的清单里没有 stop
@@ -310,6 +317,36 @@ int main()
         const auto both = call("bash", R"({"command":"echo one; echo two >&2; echo three"})");
         CHECK(msg(both) == "one\ntwo\nthree\n",
               "两条流合流，顺序就是人在终端里看见的顺序");
+    }
+
+    printf("== search：调 realontext CLI，搜的是 workdir ==\n");
+    {
+        CHECK(st(call("search", "{}")) != 0 && msg(call("search", "{}")).find("pattern") != std::string::npos,
+              "缺 pattern → 报错点名缺的是哪个");
+        if (std::system("command -v realontext >/dev/null 2>&1") != 0)
+            printf("  skip: realontext 不在 PATH 上（这个平台没内置，也没装）\n");
+        else
+        {
+            const fs::path wd = g_home / "sw";
+            fs::create_directories(wd);
+            {
+                std::ofstream o(wd / "lib.cpp");
+                o << "int find_widget(int x)\n{\n    return x + 1; // it's here\n}\n";
+            }
+            const auto hit = run_tool("s1", "search", json{{"pattern", "find_widget"}}, nullptr, wd.string());
+            CHECK(st(hit) == 0 && msg(hit).find("lib.cpp") != std::string::npos &&
+                      msg(hit).find("return x + 1") != std::string::npos,
+                  "命中 → 回整段函数，路径相对 workdir");
+            const auto quote = run_tool("s2", "search", json{{"pattern", "it's"}}, nullptr, wd.string());
+            CHECK(st(quote) == 0 && msg(quote).find("lib.cpp") != std::string::npos,
+                  "pattern 里的单引号原样到达，不被 shell 吃掉");
+            const auto none = run_tool("s3", "search", json{{"pattern", "no_such_name_zz"}}, nullptr, wd.string());
+            CHECK(st(none) == 0 && msg(none).find("no match") != std::string::npos,
+                  "没命中不算失败，告诉模型放宽 pattern");
+            const auto bad = run_tool("s4", "search", json{{"pattern", "foo("}}, nullptr, wd.string());
+            CHECK(st(bad) != 0 && msg(bad).find("regex") != std::string::npos,
+                  "正则写错 → 报错带原文");
+        }
     }
 
     printf("== 权限裁决（一个配置键，一个 switch） ==\n");

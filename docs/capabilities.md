@@ -92,13 +92,14 @@ MCP 递来的本来就是 JSON，转成结构体再转回去是两次互相抵�
 结果只有一种形状：`{"content": [块...], "isError"}`，也是 MCP 那个。
 带不动块数组的协议在 `llm/upstream/<协议>.cpp` 里压平（ADR-0023 §3）。
 
-### 内置那五个
+### 内置那六个
 
 LLM 见到的就是短名——没有命名空间前缀这回事了。
 
 | 工具 | 职责 | 安全属性 |
 |---|---|---|
 | `read` | 读文件 → 每行带行号与行 hash（`142 29c 正文`），整个文件、不截断 | 只读 |
+| `search` | 调 `realontext query` 搜 workdir 的代码 → 整段函数与类，按 `pattern` 匹配、`query` 重排；realontext 二进制随 core 内置（ADR-0026） | 只读 |
 | `edit` | 把第 `line` 行换成 `new_text`（`hash` 对得上才动手）；`edits` 数组可跨多文件 | 危险（过权限检查点） |
 | `bash` | 执行 shell 命令，回传 stdout **与 stderr**（合流） | 危险（过权限检查点） |
 | `spawn` | 派生一个 agent 去干一件事，**立刻返回它的 id，不等它跑完**；`in_edges` / `out_edges` 由模型决定（ADR-0019 §4b） | 危险（过权限检查点） |

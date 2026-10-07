@@ -51,9 +51,9 @@ _Avoid_: `compact`、`压缩`、`总结`（那三个词在本项目里指的是�
 
 LLM 可调用的具名函数。带名称、描述、参数 Schema（JSON Schema）、危险标记，执行后返回结构化结果。
 
-**两个来源，一个词。** 内置的五个随 core 一起编译，少一个就是 core 坏了：文件与命令那三个 `read` / `edit` / `bash`，多 agent 那两个 `spawn` / `send_message`（[[ADR-0019]]）。**出口不在其中**——收工归 [[收工判定（Stop Verdict）]]，不归模型挑一个工具调（[[ADR-0025]]）。[[MCP Server]] 交出来的那些随外部进程生灭，少一个是环境的事。**模型眼里没有这条界线**——一份清单、同样的 Schema、同样的 `tool_use`，挑一个调，没有第二种调法。
+**两个来源，一个词。** 内置的六个随 core 一起编译，少一个就是 core 坏了：文件与命令那四个 `read` / `search` / `edit` / `bash`（`search` 调随 core 内置的 realontext，[[ADR-0026]]），多 agent 那两个 `spawn` / `send_message`（[[ADR-0019]]）。**出口不在其中**——收工归 [[收工判定（Stop Verdict）]]，不归模型挑一个工具调（[[ADR-0025]]）。[[MCP Server]] 交出来的那些随外部进程生灭，少一个是环境的事。**模型眼里没有这条界线**——一份清单、同样的 Schema、同样的 `tool_use`，挑一个调，没有第二种调法。
 
-**结果是一个块数组**（`text` / `image` / `audio` / 资源）加一个「这次算不算失败」——就是 MCP 定的那个形状。这不是为了迁就 MCP：一个工具本来就不一定只有一段文字好说（读一张图、截一张屏），内置的那几个迟早也要用到它。用同一个形状的好处是**丢东西的地方变成了知道自己在丢什么的那一层**——能不能带图片是端点[[Protocol]]的事，`llm/upstream/<协议>.cpp` 知道，工具不知道。工具照实交出手上的东西，压扁发生在最后一步。今天内置五个交出来的都是单个 `text` 块。
+**结果是一个块数组**（`text` / `image` / `audio` / 资源）加一个「这次算不算失败」——就是 MCP 定的那个形状。这不是为了迁就 MCP：一个工具本来就不一定只有一段文字好说（读一张图、截一张屏），内置的那几个迟早也要用到它。用同一个形状的好处是**丢东西的地方变成了知道自己在丢什么的那一层**——能不能带图片是端点[[Protocol]]的事，`llm/upstream/<协议>.cpp` 知道，工具不知道。工具照实交出手上的东西，压扁发生在最后一步。今天内置六个交出来的都是单个 `text` 块。
 
 **MCP 来的一律带危险标记**，不看它自报的 `annotations`——MCP 规范自己写着那些标注不可信，而一个第三方进程说自己无害，不构成一次权限裁决。这跟配置里认不出的 `permission` 值按 `ask` 处理是同一条规矩：该多问一句，不该多放一次行。
 
@@ -186,7 +186,7 @@ _Avoid_: `扩展`、`extension`、`容器`（[[ADR-0016]] 里那个词指的是�
 
 派发因此多**一个**分支，判的是「这条是 core 的一个动作，还是一段要发出去的文字」——一个真区别，同 `Executor::execute` 为 MCP 多的那一个。
 
-**内置的不可被覆盖**，理由同内置五个 [[Tool]]：覆盖掉 `/new` 就没法开新会话。装来的 plugin 带前缀（`/caveman:caveman-commit`）天然不撞，只有隐式 plugin 撞得上，那一条跳过并报出来。
+**内置的不可被覆盖**，理由同内置六个 [[Tool]]：覆盖掉 `/new` 就没法开新会话。装来的 plugin 带前缀（`/caveman:caveman-commit`）天然不撞，只有隐式 plugin 撞得上，那一条跳过并报出来。
 
 prompt 命令表跟着 [[Agent（代理）]]的[[工作目录（Workdir）]]走，于是 `GET /commands` **可以带一个 `agent_id`**；不带就只回内置那三条——不是降级，是那个问题在没有 agent 时没有答案（同 [[ADR-0022]] 砍掉项目级 settings 的判据）。
 
@@ -398,7 +398,7 @@ _Avoid_: `订阅者列表`、`监听器注册表`（hook 有行为，没有自�
 
 ### **工作目录（Workdir）**:
 
-一个 [[Agent]] 干活的地方。**创建 agent 时必传，没有默认值、不从 cwd 取**。它决定三件事：会话文件落在哪（`<workdir>/.realagent/sessions/`）、`read`/`edit` 的相对路径从哪算起、`bash` 起来时 `chdir` 到哪。
+一个 [[Agent]] 干活的地方。**创建 agent 时必传，没有默认值、不从 cwd 取**。它决定三件事：会话文件落在哪（`<workdir>/.realagent/sessions/`）、`read`/`edit` 的相对路径从哪算起、`bash` 起来时 `chdir` 到哪、`search` 搜哪棵树。
 
 > 实况注（2026-08-28）：三条都已落地。`Agent` 持有 `workdir_`，透传给 `Session` 与 `Executor`；`run_tool` 收一个 `workdir` 参数，`resolve()` 拿它解析相对路径，`do_bash` 在 `fork` 之后 `execl` 之前 `chdir` 过去。`POST /agent` 也已落地，`workdir` 由客户端给：**core 启动时 agent 数为 0，不自动建任何 agent**——自动建就得替用户猜 workdir。
 
@@ -512,7 +512,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 一份**模型数据表**据此可报 0 到 N 个 **Model**；表有两个来源（出厂 / 用户接管），**不合并**
 - 一个 **Model Tier** 解析为一个模型名，经 `dialog["model"]` 传给造请求那一段；协议层不感知档位
 - **Cost** 按本次模型查**模型数据表**算出，经 **status_update** 帧下发，落点是 **Status（状态行）**——不是 **Statusline（状态栏）**
-- **Tool** 两个来源拼成一张表（内置五个 + [[MCP Server]] 交出来的）；`dangerous` 的那些经 `permission` 配置裁决后才执行
+- **Tool** 两个来源拼成一张表（内置六个 + [[MCP Server]] 交出来的）；`dangerous` 的那些经 `permission` 配置裁决后才执行
 - 一个 **Agent** 有一个 **工作目录**（必传）、一个 **收件箱**、一组出 **边**、一个 **Session**（每个都落盘，只是落点分 `sessions/` 与 `sessions/sub/`）
 - 一个**组**拥有一批 **Agent**，组的单位就是客户端；跨组的 agent id 一律当「无此 agent」
 - `A → B` 这条**边**同时是三样东西：A 知道 B 存在、A 能给 B 发消息、B 跑完时通知 A（完成通知**逆边**回流——边指向你关心的那个 agent）
@@ -621,7 +621,7 @@ realagent/                  # 主仓库（core + tui + docs）
 │   ├── include/            #   公共头：config.hpp + vendored json.hpp / fkYAML.hpp + agent/ llm/ tools/ server/
 │   ├── src/
 │   │   ├── llm/            #   一次 LLM 调用：造请求 + SSE 解析 + 计价（llm.cpp）
-│   │   ├── tools/          #   内置五个工具：read / edit / bash / spawn / send_message
+│   │   ├── tools/          #   内置六个工具：read / search / edit / bash / spawn / send_message
 │   │   ├── mcp/            #   MCP 客户端与连接池（client.cpp / hub.cpp，ADR-0023）
 │   │   ├── agent/          #   agent loop、事件流、状态、工具执行、审批、skill 与命令扫盘
 │   │   ├── server/         #   QUIC/HTTP3 服务（quiche）、推送流、审批端点

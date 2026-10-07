@@ -11,7 +11,11 @@ nlohmann::json bash_def()
     return tool_def(
         "bash", "执行命令",
         "Run a command in the shell; returns stdout and stderr (merged into one stream).\n"
-        "Dangerous operations require user confirmation.",
+        "Dangerous operations require user confirmation.\n"
+        "Do not search text with grep, rg, git grep or the like, alone or inside a longer command:\n"
+        "code goes to the search tool; docs, configs, logs and command output go to\n"
+        "`realontext query --pattern RE [--path PATH]...`, which also reads a pipe\n"
+        "(`git log | realontext query --pattern fix`). Listing files by name stays here (ls, find).",
         R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})",
         true);
 }
