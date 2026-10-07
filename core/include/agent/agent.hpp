@@ -22,9 +22,9 @@
 #include "agent/hooks.hpp"
 #include "agent/session.hpp"
 #include "agent/verdict.hpp"
-#include "json.hpp"
 #include "llm/llm.hpp"
 #include "mcp/mcp.hpp"
+#include <realetting/json.hpp>
 
 namespace realagent {
 

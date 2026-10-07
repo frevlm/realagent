@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "agent/context.hpp"
-#include "json.hpp"
+#include <realetting/json.hpp>
 
 namespace realagent {
 

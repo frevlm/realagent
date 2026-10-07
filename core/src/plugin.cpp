@@ -9,7 +9,7 @@
 #include <fstream>
 
 #include "config.hpp"
-#include "json.hpp"
+#include <realetting/json.hpp>
 
 namespace realagent {
 

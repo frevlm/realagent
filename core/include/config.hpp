@@ -12,7 +12,7 @@
 #include <string>
 #include <string_view>
 
-#include "realetting.hpp"
+#include <realetting/realetting.hpp>
 
 namespace realagent {
 

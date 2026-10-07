@@ -41,7 +41,7 @@ M6 TUI              → M7 集成与测试
 - API key：`.realagent/settings.json` 的 `api_key`（不读 env；core 默认树里是空串，缺省即不发 Authorization）
 
 **技术要点**
-- JSON：nlohmann/json 3.12.0 单头文件，逐字节上游，vendored 在 `core/include/json.hpp`。**core 不再包一层壳**——链式 `a["b"]["c"]` 与隐式转换（`std::string s = j["k"];`）是它自带的。读不受控的输入（HTTP 体、SSE 帧、盘上的文件）用 `find()` / `value(key, 默认值)`：const `operator[]` 撞上缺键是未定义行为。解析用 `parse(text, nullptr, false)` + `is_discarded()`，不抛。
+- JSON：nlohmann/json 3.12.0 单头文件，随 realetting 由 FetchContent 拉来（`<realetting/json.hpp>`，ADR-0027）。**core 不再包一层壳**——链式 `a["b"]["c"]` 与隐式转换（`std::string s = j["k"];`）是它自带的。读不受控的输入（HTTP 体、SSE 帧、盘上的文件）用 `find()` / `value(key, 默认值)`：const `operator[]` 撞上缺键是未定义行为。解析用 `parse(text, nullptr, false)` + `is_discarded()`，不抛。
 - Clang C++26 协程：C++20 协程核心完全支持（P0912R5，macOS 全支持）；P2561 非抛出协程未实现但本项目不依赖（见 ADR-0003）。
 
 **风险**（每条分「决策」与「实现」两行，两者互不蕴含）

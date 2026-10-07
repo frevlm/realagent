@@ -11,10 +11,11 @@
 
 ## 决策
 
-1. **单头文件内置**为 `core/include/realetting.hpp`，和 `json.hpp`、`fkYAML.hpp` 一样不归格式化管。它 `#include "json.hpp"`，用的就是 core 已有的 nlohmann 3.12.0。
-2. `Config` 只剩一个 `realetting::Ref`：`get` 读内存里那份 默认值 ⊕ 文件，`persist` 就是 `settings_[key] = v`。
-3. 删掉没有调用方的 `has()` 与 `to_json()`。
-4. models.json 不动：它的根是数组、语义是整表替换、core 从不写它，不是 realetting 管的那种文件。
+1. **CMake `FetchContent` 引入，钉 tag**（现为 `v0.1.0`），与 cpp-httplib 同一种方式。升级只改 `GIT_TAG`。
+2. **nlohmann/json 只留一份：realetting 带的那份。** 删掉 `core/include/json.hpp`，全项目改为 `#include <realetting/json.hpp>`。两份并存时 include guard 同名，先进来的那份静默生效，版本一旦分叉就是暗病。nlohmann 的版本从此跟着 realetting 走。
+3. `Config` 只剩一个 `realetting::Ref`：`get` 读内存里那份 默认值 ⊕ 文件，`persist` 就是 `settings_[key] = v`。
+4. 删掉没有调用方的 `has()` 与 `to_json()`。
+5. models.json 不动：它的根是数组、语义是整表替换、core 从不写它，不是 realetting 管的那种文件。
 
 ## 后果
 

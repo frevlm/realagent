@@ -30,6 +30,12 @@ FetchContent_Declare(httplib
 FetchContent_MakeAvailable(httplib)
 # 普通 -I，排在每个 -isystem 之前：Homebrew 在 /opt/homebrew/include 装着另一个版本的 httplib.h，不许它先被找到
 set_property(TARGET httplib PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "")
+# realetting：settings.json 的读写（ADR-0027）。nlohmann/json 也从它这里来，全项目只有这一份。
+FetchContent_Declare(realetting
+  GIT_REPOSITORY https://github.com/frevlm/realetting.git
+  GIT_TAG v0.1.0
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(realetting)
 
 add_library(realagent_core_lib STATIC
   src/config.cpp
@@ -61,6 +67,7 @@ add_library(realagent_core_lib STATIC
   src/mcp/hub.cpp
 )
 target_include_directories(realagent_core_lib PUBLIC include)
+target_link_libraries(realagent_core_lib PUBLIC realetting::realetting)
 target_link_libraries(realagent_core_lib PRIVATE ${CURL_LIBRARIES})
 
 add_executable(realagent-core

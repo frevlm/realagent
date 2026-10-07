@@ -105,7 +105,7 @@ system prompt 里每个 skill 只占一行：名字、描述、绝对路径。�
 
 `SKILL.md` 的形状不由本项目定义。[Agent Skills 规范](https://agentskills.io/specification)写的是「YAML frontmatter + Markdown 正文」，必需字段两个（`name`、`description`），且 `name` 必须与父目录名一致——所以 core 的名字**直接取目录名**，文件系统已经保证它唯一，读出来再比对只是给自己造一类要处理的错误。解析器存在的唯一理由是拿到 `description`。
 
-解析用 vendored 的 fkYAML 单头文件（`core/include/fkYAML.hpp`），与 `json.hpp` 同一条路子：不必安装、不必链库、`find_package` 仍旧是三个。**不手写 frontmatter 解析器**——skill 是从互联网抄来的第三方输入，形状不由 core 说了算；手写的那种不会报错，它会在没见过的写法上安静地给出错值（`description: >` 这种折叠标量在现实里占三成）。「不兜底」反对的是替用户擦屁股，不是反对按格式的真实定义去解析它。
+解析用 vendored 的 fkYAML 单头文件（`core/include/fkYAML.hpp`）：不必安装、不必链库。**不手写 frontmatter 解析器**——skill 是从互联网抄来的第三方输入，形状不由 core 说了算；手写的那种不会报错，它会在没见过的写法上安静地给出错值（`description: >` 这种折叠标量在现实里占三成）。「不兜底」反对的是替用户擦屁股，不是反对按格式的真实定义去解析它。
 
 skill 是 [[Plugin（插件）]] 的一个成员，不是 plugin 本身——`~/.realagent/skills/` 与 `<workdir>/.realagent/skills/` 这两处，是那两个隐式 plugin 的 skill 目录。
 
@@ -610,7 +610,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 服务端库：core 用 **cpp-httplib**（照搬 realontext 的 Relay）；TUI 用 net/http + gorilla/websocket。2026-08 到 2026-10 用的是 QUIC/HTTP3（quiche + quic-go），弃用理由见 ADR-0026。
 - 出站 Provider 请求：core 用 libcurl，按 `protocol` 配置说 HTTP + SSE；与入站客户端通信无关。
 - 工具结果：一个 json，形状 `{"status": <int, 0=成功>, "output": <string, 给模型看的文本>}`；`Executor::execute` 再加一个 `"interrupted"` 键（core 本次执行期间提没提过中止）。没有 `ToolResult`/`ExecResult` 结构体——工具本来就在拼 json，两个字段的信封是多余的。
-- JSON 实现：nlohmann/json 3.12.0，单头文件逐字节 vendored 在 `core/include/json.hpp`，类型就是 `nlohmann::json`——**core 不包壳**。链式 `a["b"]["c"]` 与隐式转换是库自带的；读不受控的输入用 `find()` / `value(key, 默认值)`（const `operator[]` 撞上缺键是未定义行为），解析用 `parse(text, nullptr, false)` + `is_discarded()`。
+- JSON 实现：nlohmann/json 3.12.0，随 realetting 一起由 FetchContent 拉来，`#include <realetting/json.hpp>`，全项目只有这一份（ADR-0027）；类型就是 `nlohmann::json`——**core 不包壳**。链式 `a["b"]["c"]` 与隐式转换是库自带的；读不受控的输入用 `find()` / `value(key, 默认值)`（const `operator[]` 撞上缺键是未定义行为），解析用 `parse(text, nullptr, false)` + `is_discarded()`。
 - DeepSeek 接入：端点 `https://api.deepseek.com/anthropic`，模型 `deepseek-v4-flash`（或 `deepseek-v4-pro`），API key 见 platform.deepseek.com。工具调用与流式完整支持；`cache_control` 被忽略（验证首版无需 vendor 层）。
 - 参考资料：`OPENCODE_RESEARCH.md`（OpenCode 架构调研）。
 
@@ -619,7 +619,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 ```
 realagent/                  # 主仓库（core + tui + docs）
 ├── core/                   # C++ 常驻服务，HTTP + WebSocket（ADR-0006、ADR-0026）
-│   ├── include/            #   公共头：config.hpp + vendored json.hpp / fkYAML.hpp + agent/ llm/ tools/ server/
+│   ├── include/            #   公共头：config.hpp + vendored fkYAML.hpp + agent/ llm/ tools/ server/
 │   ├── src/
 │   │   ├── llm/            #   一次 LLM 调用：造请求 + SSE 解析 + 计价（llm.cpp）
 │   │   ├── tools/          #   内置五个工具：read / edit / bash / spawn / send_message

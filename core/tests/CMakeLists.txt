@@ -2,6 +2,7 @@
 # mcp_stub_server 是 MCP 测试的对手进程。
 add_executable(mcp_stub_server mcp_stub_server.cpp)
 target_include_directories(mcp_stub_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(mcp_stub_server PRIVATE realetting::realetting)
 
 foreach(name config llm session skills tools agent verdict stop_loop mcp mcp_hub commands hooks plugin_e2e)
   add_executable(test_${name} test_${name}.cpp)
