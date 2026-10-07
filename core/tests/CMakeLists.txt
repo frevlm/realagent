@@ -10,3 +10,7 @@ foreach(name config llm session skills tools agent verdict stop_loop mcp mcp_hub
   add_dependencies(test_${name} mcp_stub_server)
   add_test(NAME ${name} COMMAND test_${name})
 endforeach()
+
+# 测试二进制不在 realagent-core 旁边，PATH 照 core 启动时那样补上内置的 realontext
+set_tests_properties(tools PROPERTIES
+  ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/..")

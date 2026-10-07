@@ -1,7 +1,13 @@
 /*
  * main.cpp — realagent core 入口：读配置、建 agent 池、挂路由、监听
  */
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #include "agent/agents.hpp"
@@ -23,10 +29,30 @@ json parse_body(const std::string &body)
     return j.is_object() ? j : json::object();
 }
 
+/* 自己所在目录排进 PATH 最前：随 core 发的 realontext 在那里，search 与 bash 都找得到它（ADR-0027）。 */
+void put_own_dir_on_path()
+{
+#if defined(__APPLE__)
+    char buf[4096];
+    uint32_t n = sizeof buf;
+    if (_NSGetExecutablePath(buf, &n) != 0) return;
+    const std::filesystem::path self(buf);
+#else
+    const std::filesystem::path self("/proc/self/exe");
+#endif
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::canonical(self, ec).parent_path();
+    if (ec) return;
+    const std::string path = getenv_or("PATH", "");
+    setenv("PATH", (dir.string() + (path.empty() ? "" : ":" + path)).c_str(), 1);
+}
+
 } // namespace
 
 int main()
 {
+    put_own_dir_on_path(); // 早于任何线程：setenv 不是线程安全的
+
     auto loaded = Config::load();
     if (!loaded)
     {

@@ -47,8 +47,8 @@ inline const nlohmann::json *find_by_name(const nlohmann::json &table, std::stri
 const nlohmann::json &tool_defs();
 const nlohmann::json *find_tool(std::string_view name);
 
-/* 执行内置的 read / edit / bash。call_id 进实时输出帧；相对路径从 workdir 算起；
- * abort 变真时 bash 杀掉子进程组。 */
+/* 执行内置的 read / search / edit / bash。call_id 进实时输出帧；相对路径从 workdir 算起；
+ * abort 变真时 bash / search 杀掉子进程组。 */
 nlohmann::json run_tool(const std::string &call_id, const std::string &name,
                         const nlohmann::json &params, const EmitFn &emit,
                         const std::string &workdir, const std::atomic<bool> *abort = nullptr);
@@ -150,6 +150,10 @@ inline std::string hash_line(const std::string &s)
 
 nlohmann::json read_def();
 nlohmann::json read_run(const nlohmann::json &params, const std::string &workdir);
+
+nlohmann::json search_def();
+nlohmann::json search_run(const nlohmann::json &params, const std::string &workdir,
+                          const std::atomic<bool> *abort);
 
 nlohmann::json edit_def();
 nlohmann::json edit_run(const nlohmann::json &params, const std::string &workdir);

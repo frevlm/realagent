@@ -8,7 +8,7 @@ namespace {
 const nlohmann::json &table()
 {
     static const nlohmann::json k = nlohmann::json::array(
-        {read_def(), edit_def(), spawn_def(), send_message_def(), bash_def()});
+        {read_def(), search_def(), edit_def(), spawn_def(), send_message_def(), bash_def()});
     return k;
 }
 
@@ -34,6 +34,7 @@ nlohmann::json run_tool(const std::string &call_id, const std::string &name,
                         const std::string &workdir, const std::atomic<bool> *abort)
 {
     if (name == "read") return read_run(params, workdir);
+    if (name == "search") return search_run(params, workdir, abort);
     if (name == "edit") return edit_run(params, workdir);
     if (name == "bash") return bash_run(call_id, params, emit, workdir, abort);
     return tool_fail("unknown tool: " + name);
