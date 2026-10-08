@@ -8,6 +8,7 @@ import * as core from "./core";
 import type { Agent, Approval, Command, Frame, Model, Replayed, Reply, Session, Statusline } from "./core";
 import { $, ago, basename, el, esc, ic, q, shortPath, toast, type Icon } from "./dom";
 import { md } from "./md";
+import { setup, type Settings } from "./setup";
 
 const S = {
   agentId: 0,
@@ -697,6 +698,9 @@ function onConn(ok: boolean) {
 
 (async () => {
   applyTheme();
+  // 首启引导（setup.ts）：settings.json 里 setup_done 不为 true 就先走一遍
+  const cfg = await core.call<Settings>("GET", "/setup");
+  if ((await core.setupForced()) || !cfg.setup_done) await setup(cfg);
   S.workdir = await core.workdir();
   await core.subscribe(handle, onConn);
   const r = await call<Reply>("POST", "/agent", { workdir: S.workdir });

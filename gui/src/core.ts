@@ -80,6 +80,7 @@ interface Env {
   core: string;      // host:port
   client_id: string; // 一个进程一个，网页重载不换组（ADR-0021）
   workdir: string;
+  setup: boolean;    // make setup-*：不管引导过没有，先重走一遍
 }
 
 declare global {
@@ -103,6 +104,8 @@ export async function call<T>(method: Method, path: string, body: object = {}): 
 }
 
 export const workdir = async () => (await env).workdir;
+
+export const setupForced = async () => (await env).setup;
 
 export const openUrl = (url: string) => window.runtime.BrowserOpenURL(url);
 

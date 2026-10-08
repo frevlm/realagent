@@ -186,6 +186,9 @@ int main()
                 CHECK(on_disk["api_key"] == "sk-test", "用户原有的键原样保留");
                 // size==2 一并覆盖了 small_model / permission 等默认值没被写进来
                 CHECK(on_disk.size() == 2, "文件里只有用户配过的两个键，默认值没渗进去");
+                CHECK((fs::status(home / ".realagent" / "settings.json").permissions() & fs::perms::all) ==
+                          (fs::perms::owner_read | fs::perms::owner_write),
+                      "里面有 api_key：权限 600");
             }
         }
     }

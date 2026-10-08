@@ -16,7 +16,9 @@ nlohmann::json defaults()
     // permission：ask（问用户）/ allow-all / deny。
     // mcp_http_bridge：http 型 MCP server 的桥接命令模板（ADR-0024 §5），空数组 = 不支持 http。
     // 占位符 {url} / {name} / {value}；子数组是每个 header 重复一次的那一组。
+    // setup_done：首启引导走完过没有。false 时 TUI 启动先跑引导（GET / POST /setup）。
     return {{"permission", "ask"},
+            {"setup_done", false},
             {"mcp_http_bridge",
              {"npx", "-y", "mcp-remote", "{url}",
               nlohmann::json::array({"--header", "{name}: {value}"})}}};
@@ -68,6 +70,8 @@ bool write_atomic(const fs::path &target, const std::string &text)
         }
         f << text << "\n";
     }
+    // 里面有 api_key：只给自己读写
+    fs::permissions(tmp, fs::perms::owner_read | fs::perms::owner_write, ec);
     fs::rename(tmp, target, ec);
     if (ec)
     {

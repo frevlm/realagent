@@ -199,6 +199,45 @@ func (c *Client) FetchStatusline() (Statusline, error) {
 	return s, err
 }
 
+// Setup 是首启引导的那几项：GET /setup 回整棵配置树，取这几个；POST /setup 原样写回。
+type Setup struct {
+	Done       bool   `json:"setup_done,omitempty"`
+	Protocol   string `json:"protocol"`
+	BaseURL    string `json:"base_url"`
+	APIKey     string `json:"api_key"`
+	Model      string `json:"model"`
+	SmallModel string `json:"small_model"`
+}
+
+func (c *Client) FetchSetup() (Setup, error) {
+	var s Setup
+	err := c.getJSON("/setup", &s)
+	return s, err
+}
+
+// ApplySetup 落盘（POST /setup）。core 校验不过回 error。
+func (c *Client) ApplySetup(s Setup) error {
+	r, err := c.postJSON("/setup", s)
+	if err == nil && r.Error != "" {
+		err = fmt.Errorf("%s", r.Error)
+	}
+	return err
+}
+
+// FetchModels 按 s 里的 protocol / base_url / api_key 拉端点的模型清单（POST /setup/models）。
+func (c *Client) FetchModels(s Setup) ([]string, error) {
+	r, err := c.postJSON("/setup/models", s)
+	if err != nil {
+		return nil, err
+	}
+	if r.Error != "" {
+		return nil, fmt.Errorf("%s", r.Error)
+	}
+	var list []string
+	err = json.Unmarshal(r.Data, &list)
+	return list, err
+}
+
 // CloseGroup 正常退出前通知 core（POST /group/close）
 func (c *Client) CloseGroup() error {
 	_, err := c.postJSON("/group/close", map[string]string{"client_id": c.clientID})

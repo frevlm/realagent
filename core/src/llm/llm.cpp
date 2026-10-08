@@ -3,9 +3,12 @@
  */
 #include "llm/llm.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+
+#include <curl/curl.h>
 
 namespace realagent {
 namespace fs = std::filesystem;
@@ -59,6 +62,50 @@ std::string endpoint_config_error(const Config &cfg)
   "model": "deepseek-v4-flash",
   "api_key": "sk-你的密钥"
 })";
+    return out;
+}
+
+/* ==================== 首启引导拉模型清单（POST /setup/models）==================== */
+
+static size_t append_body(char *p, size_t size, size_t n, void *out)
+{
+    static_cast<std::string *>(out)->append(p, size * n);
+    return size * n;
+}
+
+std::expected<std::vector<std::string>, std::string> setup_models(const nlohmann::json &in)
+{
+    const std::string key = in.value("api_key", std::string());
+    // anthropic-messages 的路径带 /v1、多两个头；另两套同属 OpenAI 一家，清单端点相同
+    const bool anthropic = in.value("protocol", std::string()) == "anthropic-messages";
+    const std::string url = in.value("base_url", std::string()) + (anthropic ? "/v1/models?limit=1000" : "/models");
+    std::vector<std::string> headers{"Authorization: Bearer " + key};
+    if (anthropic) headers.insert(headers.end(), {"x-api-key: " + key, "anthropic-version: 2023-06-01"});
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return std::unexpected("curl 初始化失败");
+    std::string body;
+    curl_slist *hdrs = nullptr;
+    for (const auto &h : headers) hdrs = curl_slist_append(hdrs, h.c_str());
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_body);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 引导页在等它，拉不到就让用户手填
+    const CURLcode rc = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(hdrs);
+    if (std::string e = http_status_error(status, body); !e.empty()) return std::unexpected(e);
+    if (rc != CURLE_OK) return std::unexpected(std::string("curl 失败: ") + curl_easy_strerror(rc));
+
+    // 三套协议都是 {"data":[{"id":...}]}
+    const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+    if (!j.is_object()) return std::unexpected("模型清单不是 JSON 对象");
+    std::vector<std::string> out;
+    for (const nlohmann::json &m : j.value("data", nlohmann::json::array())) out.push_back(m.value("id", ""));
+    std::sort(out.begin(), out.end());
     return out;
 }
 

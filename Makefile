@@ -10,7 +10,7 @@ TUI       := $(BUILD_DIR)/realagent-tui
 $(NINJA):
 	cmake -S . -B $(BUILD_DIR) -G Ninja
 
-.PHONY: all core tui gui dev dev-browser dev-app test run tui-run fmt fmt-check clean help
+.PHONY: all core tui gui dev dev-browser dev-app setup setup-browser setup-app test run tui-run fmt fmt-check clean help
 
 all: core tui        ## 构建全部（core + TUI），默认目标
 
@@ -48,6 +48,16 @@ dev-browser: core    ## 开发：core + gui 网页（浏览器开 localhost:3411
 
 dev-app: core        ## 开发：core + gui 桌面窗口（热重载）
 	$(call with-core,cd gui && REALAGENT_WORKDIR=$(CURDIR) $(WAILS) dev)
+
+# setup-* 与 dev-* 一一对应：先重走一遍配置引导（写 ~/.realagent/settings.json），再进主界面
+setup: all           ## 同 dev，先重走配置引导
+	$(call with-core,$(TUI) setup)
+
+setup-browser: core  ## 同 dev-browser，先重走配置引导
+	$(call with-core,cd gui && REALAGENT_SETUP=1 REALAGENT_WORKDIR=$(CURDIR) $(WAILS) dev -browser)
+
+setup-app: core      ## 同 dev-app，先重走配置引导
+	$(call with-core,cd gui && REALAGENT_SETUP=1 REALAGENT_WORKDIR=$(CURDIR) $(WAILS) dev)
 
 # 先构建全部目标（含测试可执行文件）再跑 ctest。只 configure 不构建的话，
 # 干净的 build 目录里根本没有测试二进制，ctest 会把四个用例全报 "Not Run"——

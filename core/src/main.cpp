@@ -75,8 +75,7 @@ int main()
     };
 
     // 端点没配齐也照常起：这段话会原样回给每一条 POST /message，出现在用户眼前
-    const std::string cfg_error = endpoint_config_error(cfg);
-    if (!cfg_error.empty()) fprintf(stderr, "[config] %s\n", cfg_error.c_str());
+    if (const std::string e = endpoint_config_error(cfg); !e.empty()) fprintf(stderr, "[config] %s\n", e.c_str());
 
     ApprovalCoordinator approval;
     approval.set_emit(ctx.emit_fn);
@@ -125,7 +124,8 @@ int main()
                      const std::string msg = j.value("message", "");
                      if (msg.empty()) return command_error("empty message");
                      if (msg[0] == '/') return handle_command(ctx, pool, a, msg);
-                     if (!cfg_error.empty()) return command_error(cfg_error);
+                     // 每条现算：POST /setup 会在运行中把端点配齐
+                     if (std::string e = endpoint_config_error(cfg); !e.empty()) return command_error(e);
                      a.post(msg);
                      return std::string(R"({"status":"processing"})");
                  }));
@@ -165,6 +165,23 @@ int main()
     server.route("POST", "/group/close", [](const std::string &) { return std::string(R"({"ok":true})"); });
 
     server.route("GET", "/statusline", [&ctx](const std::string &) { return statusline_payload(ctx).dump(); });
+
+    // 引导页预填现值：配置树原样给，客户端改完原样写回
+    server.route("GET", "/setup", [&cfg](const std::string &) { return cfg.to_json().dump(); });
+    server.route("POST", "/setup", [&cfg](const std::string &body) {
+        // 只写引导页那五项：客户端的请求体里还带着 client_id 这类东西
+        const json in = parse_body(body);
+        for (const char *k : {"protocol", "base_url", "api_key", "model", "small_model"})
+            if (in.contains(k) && !cfg.persist(k, in[k]))
+                return command_error("写 ~/.realagent/settings.json 失败（原因见 core 日志）");
+        cfg.persist("setup_done", true);
+        return std::string(R"({"ok":true})");
+    });
+    server.route("POST", "/setup/models", [](const std::string &body) {
+        const auto models = setup_models(parse_body(body));
+        if (!models) return command_error(models.error());
+        return json{{"ok", true}, {"data", *models}}.dump();
+    });
 
     // 状态栏变了就推一帧。配置只在请求里改（/model），所以每条请求之后比一次就够
     std::string last_statusline = statusline_payload(ctx).dump();

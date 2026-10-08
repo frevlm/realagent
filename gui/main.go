@@ -22,11 +22,12 @@ import (
 //go:embed all:dist
 var assets embed.FS
 
-// Env 是网页启动时向这里要的三样
+// Env 是网页启动时向这里要的几样
 type Env struct {
 	Core     string `json:"core"`
 	ClientID string `json:"client_id"`
 	Workdir  string `json:"workdir"`
+	Setup    bool   `json:"setup"` // REALAGENT_SETUP 非空（make setup-*）：不管引导过没有，先重走一遍
 }
 
 // App 绑定给网页：window.go.main.App
@@ -66,7 +67,7 @@ func main() {
 	}
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	app := &App{Env{Core: core, ClientID: hex.EncodeToString(b[:]), Workdir: workdir()}}
+	app := &App{Env{Core: core, ClientID: hex.EncodeToString(b[:]), Workdir: workdir(), Setup: os.Getenv("REALAGENT_SETUP") != ""}}
 
 	err := wails.Run(&options.App{
 		Title:       "realagent",

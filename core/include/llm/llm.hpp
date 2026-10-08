@@ -42,6 +42,10 @@ std::optional<Protocol> protocol_from(std::string_view name);
 /* protocol / base_url / model 配齐了返回空串；否则返回一段人话，附一段可照抄的配置。 */
 std::string endpoint_config_error(const Config &cfg);
 
+/* 首启引导（POST /setup/models）：按 {protocol, base_url, api_key} 拉端点的模型 id，按名排序。
+ * 拉不到返回人话，客户端退回手动输入。 */
+std::expected<std::vector<std::string>, std::string> setup_models(const nlohmann::json &in);
+
 /* 非 2xx 时的人话错误（能从 body 里捞出 message 就捞）。status 0 = 没拿到响应，返回空串。 */
 std::string http_status_error(long status, const std::string &body);
 

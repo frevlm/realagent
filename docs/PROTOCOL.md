@@ -41,6 +41,9 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `POST /interrupt` | 中止某个 agent 的 run，体 `{"client_id","agent_id"}`，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。多 agent 之后必须指名道姓，否则 Esc 一按全场停摆。core 侧置 abort 位 + 取消**这个 agent** 挂着的审批（`Agent::interrupt()` + `ApprovalCoordinator::cancel(agent_id)`）——一刀切会把「停下这一个」办成「全场停摆」。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——core 同时让在跑的 bash 收掉它的进程组（`Executor::interrupt()` 置这个 agent 自己的中断标志，`run_proc` 轮询到即 SIGTERM，1 秒不死再 SIGKILL；只影响这一个 agent）。read/edit 跑得快，不设中断点 | ✅ |
 | `POST /approval-response` | 审批裁决回传（TUI → core），体 `{"id", "allow"}` | ✅ |
 | `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "owned_by", "context"}`，后两项来自模型数据表，查不到就只有 model | ✅ |
+| `GET /setup` | 整棵配置树（同 settings.json 合并默认值后的样子，含 `api_key`），引导页拿它预填。TUI 启动时看 `setup_done` 是不是 `true`，不是就先跑引导 | ✅ |
+| `POST /setup` | 引导落盘，体 `{"protocol","base_url","api_key","model","small_model"}` → `{"ok":true}`。只写这五项、收到什么写什么，逐键走 `Config::persist`（内存同步改，不用重启 core），最后写 `setup_done: true` | ✅ |
+| `POST /setup/models` | 引导的模型页拉清单，体 `{"protocol","base_url","api_key"}` → `{"ok":true,"data":["模型 id",...]}`（按名排序）。core 去问端点：anthropic-messages 是 `<base_url>/v1/models`，openai-* 是 `<base_url>/models`。拉不到（HTTP 非 2xx、连不上、10 秒超时）→ `{"ok":false,"error"}`，客户端退回手动输入 | ✅ |
 | `GET /sessions` | 会话清单 `[{id, title, messages, mtime, opened_by}]`，按 `mtime` 倒序。**体带 `client_id` 与 `agent_id`**——会话目录跟着那个 agent 的 workdir 走（`<workdir>/.realagent/sessions`），不是进程级的。`opened_by` 取代了从前的 `current`：多 agent 之后「当前」没有主语了，一个会话要么被某个 agent 打开着（值为它的 id），要么躺在盘上（`null`）| ✅ |
 | `POST /session` | 新建 / 恢复会话：体 `{"client_id","agent_id"}` = 新建，多带一个 `"id"` = 恢复。响应 `{"ok", "data"}`（`data` 为更新后的清单）；id 不存在 → `{"ok":false,"error":"unknown session: ..."}`，且**当前会话原样不动** | ✅ |
 | `GET /events` | 推送流订阅：WebSocket 升级，见下节 (2)。**身份走查询串 `?client_id=X`，这是唯一的例外**——别处一律 JSON 体，而这一处身份必须让传输层看见：这条连接就是"这个客户端还在不在"的判据（ADR-0021） | ✅ |

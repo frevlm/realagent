@@ -931,10 +931,16 @@ func renderApproval(p *pendingApproval, width int) []string {
 	}
 }
 
+// 用法：realagent-tui [setup] [addr]。带 setup = 不管引导过没有，先重走一遍引导
 func main() {
+	args := os.Args[1:]
+	force := len(args) > 0 && args[0] == "setup"
+	if force {
+		args = args[1:]
+	}
 	addr := "127.0.0.1:12345"
-	if len(os.Args) > 1 {
-		addr = os.Args[1]
+	if len(args) > 0 {
+		addr = args[0]
 	}
 	c := client.New(addr)
 	// 退出时通知 core（ADR-0021）
@@ -949,6 +955,11 @@ func main() {
 	if err := c.CreateAgent(wd); err != nil {
 		fmt.Fprintln(os.Stderr, "连不上 core:", err)
 		os.Exit(1)
+	}
+
+	// 首启引导（setup.go）：settings.json 里 setup_done 不为 true 就先走一遍
+	if s, err := c.FetchSetup(); err == nil && (force || !s.Done) {
+		runSetup(c, s)
 	}
 
 	// alternate screen 才能「换一个 agent 看」（ADR-0020）。不开鼠标模式：会关掉终端的选中复制
