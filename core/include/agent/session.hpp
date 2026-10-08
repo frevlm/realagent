@@ -14,6 +14,9 @@
 
 namespace realagent {
 
+/* 一个工作目录的会话目录：`<workdir>/.realagent/sessions`。派生的 agent 落在它下面的 sub/。 */
+std::string sessions_dir(const std::string &workdir);
+
 /* 会话清单一条。字段名即 PROTOCOL.md 的响应契约。 */
 struct SessionInfo {
     std::string id;         // 文件名去掉 .jsonl，形如 20260816-143022-a1b2
@@ -25,8 +28,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SessionInfo, id, title, messages, mtime)
 
 class Session {
   public:
-    /* 新会话：生成 id，不建文件（空会话不进清单），第一次 append 时才出现。 */
-    explicit Session(std::string dir);
+    /* id 为空就生成一个。不建文件（空会话不进清单），第一次 append 时才出现。 */
+    explicit Session(std::string dir, std::string id = {});
 
     const std::string &id() const { return id_; }
 
@@ -39,6 +42,8 @@ class Session {
     /* 按 mtime 倒序。目录不存在返回空。 */
     static std::vector<SessionInfo> list(const std::string &dir);
 
+    static bool exists(const std::string &dir, const std::string &id);
+    /* id 带 `/` 一律读不到：id 来自客户端，不许拿它在盘上乱走。 */
     static bool read(const std::string &dir, const std::string &id, nlohmann::json &out);
 
     /* 消息历史 → 事件帧 `[{"type", "data"}]`，与实时推送同形（ADR-0020）。 */

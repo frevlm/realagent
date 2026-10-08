@@ -10,7 +10,7 @@ namespace realagent {
 ApprovalCoordinator::~ApprovalCoordinator() { cancel_all(); }
 
 Verdict ApprovalCoordinator::await(int agent_id, const std::string &tool_name,
-                                   const std::string &params)
+                                   const std::string &params, const EmitFn &emit)
 {
     std::shared_ptr<PendingApproval> p;
     {
@@ -22,14 +22,13 @@ Verdict ApprovalCoordinator::await(int agent_id, const std::string &tool_name,
         p->params = params;
         pending_[p->id] = p;
     }
-    // 审批是全局的：客户端不管在看哪个 agent 都要弹，帧里的 agent_id 说明是谁在问
+    // 客户端不管在看哪段对话都要弹；是谁在问由 emit 盖章（session_id / root）
     nlohmann::json ev;
     ev["id"] = p->id;
-    ev["agent_id"] = agent_id;
     ev["tool"] = tool_name;
     if (nlohmann::json args = nlohmann::json::parse(params, nullptr, false); !args.is_discarded())
         ev["params"] = std::move(args);
-    if (emit_) emit_("permission_request", ev.dump());
+    if (emit) emit("permission_request", ev.dump());
 
     // 阻塞等待裁决（30s 超时按 deny）
     std::unique_lock<std::mutex> lk(p->mtx);

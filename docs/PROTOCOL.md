@@ -27,25 +27,24 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 
 ### (1) 请求-响应
 
-「实现」一列对照 core/src/main.cpp 的路由表逐条核实，2026-08-16。
+「实现」一列对照 core/src/main.cpp 的路由表逐条核实，2026-10-08。
+
+**客户端只认对话（ADR-0029）**：协议里没有 agent。一段对话的地址是 `session_id`；agent 是 core 内部的事，第一条消息到达时才建出来。
 
 | 端点 | 语义 | 实现 |
 |---|---|---|
-| `POST /agent` | 建一个 agent，体 `{"client_id","workdir"}` → `{"ok":true,"agent_id"}`。**`workdir` 必传，core 不猜**（ADR-0019）——它是全机单实例，自己的 cwd 跟任何 agent 都无关；客户端知道用户站在哪，由它给。`client_id` 决定它属于哪一组，该客户端还没有组就顺手建组。人不是图上的节点，所以这道门建出来的 agent 没有边 | ✅ |
-| `GET /agents` | agent 清单 `[{id, workdir, state, session_id, in_edges, out_edges}]`，体 `{"client_id"}`。**只列调用方那一组**（ADR-0021）——组的单位就是客户端。组内不受边的约束：客户端看得见本组全部，agent 只看得见自己的出边邻居，两层 | ✅ |
-| `GET /session` | 一个 agent 的会话内容回放（`GET /history` 为兼容别名），体 `{"client_id","agent_id"}` → **事件帧数组** `[{type, data}]`，形状与推送流逐帧相同。客户端因此复用同一个渲染器，实时看和翻历史看长得一样（ADR-0020）。读的是盘上那份，接缝在「最后一条已落盘的消息」：视图 = 这段回放 + 推送流喂进来的活尾巴。新会话还没写过盘 → 空数组，不是错 | ✅ |
+| `GET /session` | 一段对话的内容回放（`GET /history` 为兼容别名），体 `{"workdir","session_id"}` → **事件帧数组** `[{type, data}]`，形状与推送流逐帧相同。客户端因此复用同一个渲染器，实时看和翻历史看长得一样（ADR-0020）。读的是盘上那份，不需要 agent 在场；先找 `<workdir>/.realagent/sessions/`，再找它下面的 `sub/`——子 agent 的过程从这里取，嵌回父对话里看（ADR-0029 §4）。找不到 → 空数组，不是错。`session_id` 带 `/` 一律读不到 | ✅ |
 | `POST /group/close` | 关掉调用方那一组，体 `{"client_id"}`。客户端正常退出前显式发一次；**断线满 60 秒 core 自己也会关**，那是兜底不是主路（ADR-0021） | ✅ |
-| `POST /message` | 提交用户消息，体 `{"client_id","agent_id","message"}` → 投进那个 agent 的收件箱。首字符为 `/` 时按斜杠命令处理，不投收件箱（见下「命令」节）。**`agent_id` 必填、无默认**——猜"就那一个吧"在第二个 agent 出现的当天就会变成"刚才那条消息发给谁了" | ✅ |
-| `POST /command` | 执行斜杠命令，体 `{"client_id","agent_id","command":"/new"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为。**agent 正在跑时立刻回 `{"ok":false,"error":"agent 正在运行…"}`**，不排队等（见下「忙碌与中断」） | ✅ |
-| `GET /commands` | 斜杠命令列表 `[{name, description, argument_hint, kind}]`（TUI 菜单数据源，core 是唯一真相）。`kind` 为 `builtin`（`/new` `/resume` `/model`）或 `prompt`（plugin 带来的一段文字，ADR-0024）。**body 里可带 `agent_id`**——prompt 命令表跟着那个 agent 的工作目录走；不带就只回内置那三条 | ✅ |
-| `POST /interrupt` | 中止某个 agent 的 run，体 `{"client_id","agent_id"}`，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。多 agent 之后必须指名道姓，否则 Esc 一按全场停摆。core 侧置 abort 位 + 取消**这个 agent** 挂着的审批（`Agent::interrupt()` + `ApprovalCoordinator::cancel(agent_id)`）——一刀切会把「停下这一个」办成「全场停摆」。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——core 同时让在跑的 bash 收掉它的进程组（`Executor::interrupt()` 置这个 agent 自己的中断标志，`run_proc` 轮询到即 SIGTERM，1 秒不死再 SIGKILL；只影响这一个 agent）。read/edit 跑得快，不设中断点 | ✅ |
+| `POST /message` | 往一段对话里发一条消息，体 `{"client_id","workdir","session_id","message"}` → `{"status":"processing"}`。**`session_id` 由客户端给，新对话就是一个盘上还没有的 id**：本组打开着就投进去，没打开就建 agent 打开它（盘上有就接着说，没有就是新的）——agent 在这里才建出来，没有从没说过话的 agent（ADR-0029 §2）。id 不许带 `/`。别的组打开着回 `{"ok":false,"error":"这段对话在另一个窗口里开着"}`。首字符为 `/` 时按斜杠命令处理（见下「命令」节） | ✅ |
+| `POST /command` | 执行斜杠命令，体 `{"client_id","workdir","session_id","command":"/model"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为 | ✅ |
+| `GET /commands` | 斜杠命令列表 `[{name, description, argument_hint, kind}]`，体 `{"workdir"}`。`kind` 为 `builtin`（`/model` `/plugins`）或 `prompt`（plugin 带来的一段文字，跟着 workdir 走，ADR-0024）。`/new` `/resume` 不在里面：换对话是客户端的事（ADR-0029） | ✅ |
+| `POST /interrupt` | 停下一段对话，体 `{"client_id","session_id"}`，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。**停的是这段对话和它派生出去的全部**（`root` 等于它的那些 agent）——用户眼里那是一件事，Esc 按下去子 agent 还在烧钱就是没停（ADR-0029 §5）。每个被停的 agent 置 abort 位，并把自己挂着的审批按 deny 掐掉；别的对话不受牵连。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——在跑的 bash 收掉它的进程组（`run_proc` 轮询到即 SIGTERM，1 秒不死再 SIGKILL）。read/edit 跑得快，不设中断点 | ✅ |
 | `POST /approval-response` | 审批裁决回传（TUI → core），体 `{"id", "allow"}` | ✅ |
 | `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "owned_by", "context"}`，后两项来自模型数据表，查不到就只有 model | ✅ |
 | `GET /setup` | 整棵配置树（同 settings.json 合并默认值后的样子，含 `api_key`），引导页拿它预填。TUI 启动时看 `setup_done` 是不是 `true`，不是就先跑引导 | ✅ |
 | `POST /setup` | 引导落盘，体 `{"protocol","base_url","api_key","model","small_model"}` → `{"ok":true}`。只写这五项、收到什么写什么，逐键走 `Config::persist`（内存同步改，不用重启 core），最后写 `setup_done: true` | ✅ |
 | `POST /setup/models` | 引导的模型页拉清单，体 `{"protocol","base_url","api_key"}` → `{"ok":true,"data":["模型 id",...]}`（按名排序）。core 去问端点：anthropic-messages 是 `<base_url>/v1/models`，openai-* 是 `<base_url>/models`。拉不到（HTTP 非 2xx、连不上、10 秒超时）→ `{"ok":false,"error"}`，客户端退回手动输入 | ✅ |
-| `GET /sessions` | 会话清单 `[{id, title, messages, mtime, opened_by}]`，按 `mtime` 倒序。**体带 `client_id` 与 `agent_id`**——会话目录跟着那个 agent 的 workdir 走（`<workdir>/.realagent/sessions`），不是进程级的。`opened_by` 取代了从前的 `current`：多 agent 之后「当前」没有主语了，一个会话要么被某个 agent 打开着（值为它的 id），要么躺在盘上（`null`）| ✅ |
-| `POST /session` | 新建 / 恢复会话：体 `{"client_id","agent_id"}` = 新建，多带一个 `"id"` = 恢复。响应 `{"ok", "data"}`（`data` 为更新后的清单）；id 不存在 → `{"ok":false,"error":"unknown session: ..."}`，且**当前会话原样不动** | ✅ |
+| `GET /sessions` | 对话清单 `[{id, title, messages, mtime, state}]`，体 `{"client_id","workdir"}`，按 `mtime` 倒序。`state`：`running` = 本组正在跑，`elsewhere` = 在别的窗口里开着（发过去会被拒），`""` = 都不是。子 agent 的会话在 `sub/` 里，不列 | ✅ |
 | `GET /events` | 推送流订阅：WebSocket 升级，见下节 (2)。**身份走查询串 `?client_id=X`，这是唯一的例外**——别处一律 JSON 体，而这一处身份必须让传输层看见：这条连接就是"这个客户端还在不在"的判据（ADR-0021） | ✅ |
 
 未匹配任何路由的请求返回 `404`。
@@ -55,10 +54,9 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 请求体非空时以请求体为准（ADR-0028）。
 再养一套 query string 解析就是两处必须永远一致的参数格式，而这里一个查询参数都不缺。
 
-**每个动 agent 的端点都要 `client_id` 与 `agent_id`，都没有默认值**：`agent_id`
-猜"就那一个吧"，在第二个 agent 出现的当天就会变成"刚才那条消息发给谁了"（ADR-0019）；
-`client_id` 决定这个 agent 在不在你那一组，**跨组一律当「无此 agent」**——不区分
-「不存在」与「不是你的」，区分了就等于告诉调用方别的组里有什么（ADR-0021）。
+**每个动对话的端点都要 `client_id`、`workdir`、`session_id`**：`client_id` 决定这段对话在不在你那一组，
+**跨组一律当不存在**——不区分「不存在」与「不是你的」，区分了就等于告诉调用方别的组里有什么（ADR-0021）；
+`workdir` 是对话在哪个目录里开、会话文件在哪找，core 不猜（ADR-0019）；`session_id` 为空就是一段新对话。
 
 ### (2) 推送流（WebSocket）
 
@@ -66,7 +64,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 
 ## 帧格式
 
-**每帧都带 `agent_id`**：core **不为任何 agent 过滤事件**，全推，客户端认识哪个渲染哪个（ADR-0019）。于是杂活 agent 失败时用户看得见——这不需要为它设计任何东西，只需要不设计过滤。
+**帧只推给那一组的连接**（ADR-0021），组内不再过滤。**agent 发出的每帧都带 `root` 与 `session_id`**（ADR-0029 §3）：`root` 是它属于用户看见的哪段对话，`session_id` 是谁说的——不等于 `root` 就是那段对话派生出去的子 agent，客户端把它画进父对话里的子任务块。客户端只画 `root` 是当前对话的帧；不带这两个键的帧（`statusline`）是进程级的。
 
 每帧是一条 WebSocket 文本消息，`data` 是该类型的载荷：
 
@@ -87,7 +85,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `turn_start/end` | 轮次信息 | Turn 生命周期。**`turn_end` 不是收工信号**：主模型没有下一步动作时还要过一道收工判定，判不通过就还有下一个 turn（ADR-0025）。客户端的读秒跨 turn 连续，只认 `agent_end` |
 | `status_update` | 运行态数据 | 状态行数字（开放键集，见下） | ✅ |
 | `statusline` | 状态栏数据 | 会话身份变了就推一帧（见下），与 `GET /statusline` 同一份载荷 | ✅ |
-| `permission_request` | `{id, agent_id, tool, params}` | 审批请求（可靠，卡点）。**不按"当前看着谁"过滤**：审批不属于任何 agent 的视图，它是全局的，客户端不管正在看哪个 agent 都要弹，靠 `agent_id` 说明是谁在问。过滤会让一个没人看的 agent 静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**没有客户端订阅推送流时当场拒绝**，不等那 30 秒——agent 没有客户端也照跑，两条合起来就是后台 agent 的每个危险工具都卡 30 秒然后必然被拒，那不是安全策略，是一个装成策略的超时 | ✅ |
+| `permission_request` | `{id, tool, params, root, session_id}` | 审批请求（可靠，卡点）。**不按「当前看着哪段对话」过滤**：客户端不管在看哪段都要弹，靠 `root` / `session_id` 说明是子任务还是另一段对话在问。过滤会让一段没人看的对话静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**那一组没有客户端连着推送流时当场拒绝**，不等那 30 秒 | ✅ |
 | `interrupted` | 空对象 | `POST /interrupt` 生效——agent 在某个检查点停了。此后本次 run 不再有帧 | ✅ |
 | `agent_start` | 空对象 | 一次「跑」开始：agent 从 idle 醒了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
 | `agent_end` | `{cost, recap}` | 一次「跑」收工，**唯一的收工信号**：收工判定说这趟到头了，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。`cost` 是本次跑的累计花费（含判定那次调用），`recap` 是这一趟的回顾（没配小模型时为空串，ADR-0025） | ✅ |
@@ -134,20 +132,11 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 
 完整 message / tool_result 作为独立帧或结束帧，与增量同流保证最终一致。
 
-## 忙碌与中断
+## 中断
 
-`POST /command`、`GET /sessions`、`POST /session` 这三个端点要动对话历史，与 agent 运行互斥。
-所有请求排成一队、一次处理一条，所以**拿不到锁就当场回绝，绝不排队等**（ADR-0017）：
+`POST /interrupt` 不碰任何锁，任何时候都进得来——那是唯一的逃生通道，它必须永远畅通。
 
-```json
-{"ok": false, "error": "agent 正在运行——先中断（Esc / POST /interrupt）再执行这条命令"}
-```
-
-在那儿等锁，等的是"一次 run 跑完"——期间 core 收不了任何请求，
-**包括那个唯一能把 run 停下来的 `POST /interrupt`**，也推不出任何事件帧，
-客户端表现为整个假死。一次拒绝是一句话，一次假死是没有话。
-
-`POST /interrupt` 不碰这把锁，所以任何时候都进得来——那是唯一的逃生通道，它必须永远畅通。
+会话的读写（`GET /session`、`GET /sessions`）读的是盘，不碰 agent，所以不存在「agent 正在运行，先中断」这种拒绝（ADR-0029）。
 
 ## 配置没配齐
 
@@ -162,9 +151,9 @@ core **不会**因为配置没配齐而拒绝启动——那样客户端只会�
 斜杠命令有两个入口，**core 侧是同一份实现**：
 
 - `POST /message` 的 `message` 字段以 `/` 开头 —— 交互式客户端的自然路径（用户就在输入框里打）；
-- `POST /command`，体 `{"command":"/new"}` —— 给不走消息框的调用方（脚本、未来的 gui 按钮）。
+- `POST /command`，体 `{"command":"/model"}` —— 给不走消息框的调用方（脚本、gui 的模型下拉）。
 
-两者都直接返回命令结果 JSON（`{"ok":true,"command":...}`），**不启动 agent turn**。未识别命令返回 `{"error":"unknown command"}`。
+builtin 命令直接返回结果 JSON（`{"ok":true,"command":...}`），**不启动 turn**。prompt 命令（plugin 带来的）展开成正文当一条消息发进对话，回执同 `POST /message`。未识别命令返回 `{"ok":false,"error":"unknown command: ..."}`。
 
 存在两个入口是历史形态（v1 曾打算只留前者），不是两套行为——真要改命令语义，改的永远只有一处。
 
@@ -174,14 +163,12 @@ core **不会**因为配置没配齐而拒绝启动——那样客户端只会�
 
 | 斜杠命令 | 行为 | 返回 |
 |---|---|---|
-| `/new` | 新建会话：清空历史 + 换一个 JSONL 文件（旧会话留在盘上） | `{"ok":true,"command":"new","data":[会话清单]}` |
-| `/resume` | 查看会话清单（`current` 标出自己在哪儿） | `{"ok":true,"command":"resume","data":[{id,title,messages,mtime,current}]}` |
-| `/resume <id>` | 恢复某个会话（JSONL 读回历史，后续追加写进该文件） | 同上；id 不存在 → `{"ok":false,"error":"unknown session: ..."}`，**当前会话不动** |
 | `/model` | 查看模型数据表里的清单 | `{"ok":true,"command":"model","data":[{name,owned_by,context,current}]}` |
 | `/model <name>` | 切换主模型（写回 settings.json，下次调用即生效） | 同上（`data` 为更新后清单）；模型不在表里 → `{"ok":false,"error":"unknown model: ..."}` |
+| `/plugins` | 装了哪些 plugin、各带了什么；这段对话打开着时附上建 agent 时的连接错误 | `{"ok":true,"command":"plugins","data":{plugins,errors}}` |
 | 失败 | — | `{"ok":false,"command":"...","error":"..."}` |
 
-**纯客户端命令不在此表**：`/quit`（退出客户端进程）与 `/statusline`（展示偏好）由 TUI 就地处理，从不发给 core——core 是常驻服务、还连着别的客户端，它没有"退出"这个概念，也不认展示偏好。它们照常出现在斜杠菜单里，用户分不出、也不需要分。
+**纯客户端命令不在此表**：`/new`、`/resume`（换对话——只是下一条消息带哪个 `session_id`，ADR-0029）、`/quit`（退出客户端进程）与 `/statusline`（展示偏好）由客户端就地处理，从不发给 core——core 是常驻服务、还连着别的客户端，它没有"退出"这个概念，也不认展示偏好。它们照常出现在斜杠菜单里，用户分不出、也不需要分。
 
 ## 与会话持久化的关系
 

@@ -1,44 +1,56 @@
 // realagent gui —— core 的桌面客户端。协议见 docs/PROTOCOL.md，传输见 ./core.ts。
 //
 // 推送流与 GET /session 回放是同形的帧，走同一个 handle()：实时看与翻历史长得一样（ADR-0020）。
-// 只渲染当前 agent 的帧；切 agent 就清空，从 GET /session 重读。审批例外：不管在看谁都要弹。
+// 用户看见的只有对话，没有 agent（ADR-0029）：只渲染当前那段对话的帧，换一段就清空、从 GET /session 重读；
+// 它派生出去的子 agent 画进可折叠的块里，挂在派生它的那张工具卡片下面。审批例外：不管在看哪段都要弹。
 
 import "./app.css";
 import * as core from "./core";
-import type { Agent, Approval, Command, Frame, Model, Replayed, Reply, Session, Statusline } from "./core";
+import type { Approval, Command, Frame, Model, Replayed, Reply, Session, Statusline, Who } from "./core";
 import { $, ago, basename, el, esc, ic, q, shortPath, toast, type Icon } from "./dom";
 import { md } from "./md";
 import { setup, type Settings } from "./setup";
 
 const S = {
-  agentId: 0,
-  agents: new Map<number, Agent>(), // GET /agents
-  workdir: "",                      // 新建 agent 时的默认目录
-  commands: [] as Command[],        // GET /commands
-  approvals: [] as Approval[],      // 挂起的 permission_request
+  sessionId: "",               // 当前那段对话。新对话的 id 在这里生成，第一条消息到了 core 才开出它
+  sessions: [] as Session[],   // GET /sessions
+  workdir: "",                 // 对话在哪个目录里开
+  commands: [] as Command[],   // GET /commands + 本地的 /new /resume
+  approvals: [] as Approval[], // 挂起的 permission_request
   since: 0, verb: "", cost: null as number | null, timer: 0, interrupted: false,
   slashSel: 0, slashHidden: false,
 };
 
-// 所有请求都带当前 agent；端点不认的键 core 不看
+// 所有请求都带「在哪、说的是哪段」；端点不认的键 core 不看
 const call = <T>(method: core.Method, path: string, body: object = {}) =>
-  core.call<T>(method, path, { agent_id: S.agentId, ...body });
+  core.call<T>(method, path, { workdir: S.workdir, session_id: S.sessionId, ...body });
+
+// 换对话不需要 core 做任何事，所以这两条是本地的
+const LOCAL: Command[] = [
+  { name: "new", description: "开一段新对话（当前这段留在盘上）", kind: "builtin" },
+  { name: "resume", description: "换到另一段对话", kind: "builtin" },
+];
 
 // ==================== 对话流 ====================
 
 interface Text { node: HTMLElement; buf: string }
 interface Think { node: HTMLDetailsElement; body: HTMLElement; start: number; replay: boolean }
 
-// 当前正在长的那几块：思考、正文、工具卡片
-const view = {
-  think: null as Think | null,
-  text: null as Text | null,
-  tools: new Map<string, HTMLElement>(),
-  lastTool: null as HTMLElement | null,
-};
+// 一块往里长东西的地方：主对话是一块，每个子 agent 各一块。正在长的思考、正文、工具卡片各归各块
+interface Pane {
+  host: HTMLElement;
+  think: Think | null;
+  text: Text | null;
+  tools: Map<string, HTMLElement>;
+  lastTool: HTMLElement | null;
+}
+const pane = (host: HTMLElement): Pane => ({ host, think: null, text: null, tools: new Map(), lastTool: null });
 
 const thread = $("thread");
 const wrap = $("thread-wrap");
+const main = pane(thread);
+const subs = new Map<string, { node: HTMLDetailsElement; pane: Pane; loaded: boolean }>(); // 子 agent 的 session_id → 它那一块
+
 let stick = true; // 贴着底就继续贴底；用户滚上去了就不拽回来
 wrap.addEventListener("scroll", () => {
   stick = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 80;
@@ -47,8 +59,8 @@ wrap.addEventListener("scroll", () => {
 const follow = () => { if (stick) wrap.scrollTop = wrap.scrollHeight; };
 new ResizeObserver(follow).observe(wrap); // 审批卡、多行输入把底栏撑高时，别把末尾挤到下面去
 
-function add<T extends HTMLElement>(node: T): T {
-  thread.append(node);
+function add<T extends HTMLElement>(p: Pane, node: T): T {
+  p.host.append(node);
   $("empty").hidden = true;
   follow();
   return node;
@@ -56,25 +68,25 @@ function add<T extends HTMLElement>(node: T): T {
 
 function clearThread() {
   thread.textContent = "";
-  view.think = view.text = view.lastTool = null;
-  view.tools.clear();
+  Object.assign(main, pane(thread));
+  subs.clear();
   $("empty").hidden = false;
   stick = true;
 }
 
-const notice = (text: string) => add(el("div", "notice", esc(text)));
+const notice = (text: string) => add(main, el("div", "notice", esc(text)));
 
-function alertMsg(text: string) {
-  add(el("div", "alert alert-danger msg", ic("alert"))).append(text);
+function alertMsg(p: Pane, text: string) {
+  add(p, el("div", "alert alert-danger msg", ic("alert"))).append(text);
 }
 
-function userMsg(text: string) {
+function userMsg(p: Pane, text: string) {
   const m = el("div", "msg msg-user");
   const b = el("div", "bubble-user");
   b.textContent = text;
   m.append(b);
-  add(m);
-  stick = true;
+  add(p, m);
+  if (p === main) stick = true;
   follow();
 }
 
@@ -88,47 +100,47 @@ function paint() {
   follow();
 }
 
-function textAppend(delta: string, replay: boolean) {
-  if (!view.text) view.text = { node: add(el("div", "prose msg")), buf: "" };
-  view.text.buf += delta;
+function textAppend(p: Pane, delta: string, replay: boolean) {
+  if (!p.text) p.text = { node: add(p, el("div", "prose msg")), buf: "" };
+  p.text.buf += delta;
   if (replay) return;
-  dirty.add(view.text);
+  dirty.add(p.text);
   if (!raf) raf = requestAnimationFrame(paint);
 }
 
-function endText() {
-  if (!view.text) return;
-  dirty.delete(view.text);
-  view.text.node.innerHTML = md(view.text.buf);
-  view.text = null;
+function endText(p: Pane) {
+  if (!p.text) return;
+  dirty.delete(p.text);
+  p.text.node.innerHTML = md(p.text.buf);
+  p.text = null;
 }
 
-function thinkAppend(delta: string, replay: boolean) {
-  if (!view.think) {
+function thinkAppend(p: Pane, delta: string, replay: boolean) {
+  if (!p.think) {
     const d = el("details", "think msg", `<summary>${ic("sparkles")}<span>思考中</span>${ic("chev", "chev")}</summary><div class="think-body"></div>`);
     d.open = !replay;
-    view.think = { node: add(d), body: q(d, ".think-body"), start: Date.now(), replay };
+    p.think = { node: add(p, d), body: q(d, ".think-body"), start: Date.now(), replay };
   }
-  view.think.body.textContent += delta;
+  p.think.body.textContent += delta;
   follow();
 }
 
-function endThink() {
-  const t = view.think;
+function endThink(p: Pane) {
+  const t = p.think;
   if (!t) return;
   const secs = Math.round((Date.now() - t.start) / 1000);
   q(t.node, "summary span").textContent = t.replay || secs < 1 ? "思考过程" : `思考了 ${secs} 秒`;
   t.node.open = false;
-  view.think = null;
+  p.think = null;
 }
 
-function endAll() { endThink(); endText(); }
+function endAll(p: Pane) { endThink(p); endText(p); }
 
 // ==================== 工具卡片 ====================
 
 const TOOLS: Record<string, [Icon, string]> = {
   bash: ["terminal", "执行命令"], read: ["file", "读文件"], edit: ["pencil", "改文件"],
-  search: ["search", "搜代码"], spawn: ["fork", "派生 agent"], send_message: ["send", "发消息"],
+  search: ["search", "搜代码"], spawn: ["fork", "派生子任务"], send_message: ["send", "发消息"],
 };
 const toolIcon = (n: string): Icon => TOOLS[n]?.[0] ?? "wrench";
 const toolVerb = (n: string) => TOOLS[n]?.[1] ?? `调用 ${n}`;
@@ -157,37 +169,71 @@ function setToolState(card: HTMLElement, state: ToolState) {
   card.dataset.state = state;
 }
 
-function toolStart(d: { name: string; id: string }) {
+function toolStart(p: Pane, d: { name: string; id: string }) {
   const card = el("div", "tool msg",
     `<button class="tool-head"><span class="tool-icon">${ic(toolIcon(d.name))}</span><span class="tool-name"></span><span class="tool-label"></span>` +
     `<span class="tool-state"></span>${ic("chev", "chev")}</button><pre class="tool-out"></pre>`);
   q(card, ".tool-name").textContent = d.name;
   q(card, ".tool-head").onclick = () => card.classList.toggle("open");
+  card.dataset.name = d.name;
   setToolState(card, "run");
-  view.tools.set(d.id, card);
-  view.lastTool = card;
-  add(card);
+  p.tools.set(d.id, card);
+  p.lastTool = card;
+  add(p, card);
 }
 
 // 按行推但不保证一帧一行：续写即可，不假设边界
-function toolOut(d: { call_id: string; text?: string }, replay: boolean) {
-  const card = view.tools.get(d.call_id) ?? view.lastTool;
+function toolOut(p: Pane, d: { call_id: string; text?: string }, replay: boolean) {
+  const card = p.tools.get(d.call_id) ?? p.lastTool;
   if (!card) return;
   const out = q(card, ".tool-out");
   out.textContent += d.text ?? "";
   if (!replay) card.classList.add("open");
   out.scrollTop = out.scrollHeight;
   follow();
+  // 回放时 spawn 的结果里写着子 agent 的会话：在卡片下面挂一块，点开再读
+  const sid = card.dataset.name === "spawn" && d.text?.match(/\(session (\S+)\)/)?.[1];
+  if (sid) subBlock(sid, card);
 }
 
-function toolEnd(d: { id: string; status?: number; interrupted?: boolean }) {
-  const card = view.tools.get(d.id) ?? view.lastTool;
+function toolEnd(p: Pane, d: { id: string; status?: number; interrupted?: boolean }) {
+  const card = p.tools.get(d.id) ?? p.lastTool;
   if (!card) return;
   const out = q(card, ".tool-out");
   out.textContent = (out.textContent ?? "").replace(/\n+$/, "");
   setToolState(card, d.interrupted ? "stop" : d.status ? "fail" : "ok");
   // 成功的收起来，失败的留着给人看
   if (!d.status && !d.interrupted) card.classList.remove("open");
+}
+
+// ==================== 子 agent ====================
+
+// 子 agent 那一块。实时：它的第一帧到了才建，挂在正跑着的 spawn 卡片下面；回放：spawn 的结果里认出来
+function subBlock(sid: string, after?: HTMLElement) {
+  const have = subs.get(sid);
+  if (have) return have;
+  const node = el("details", "sub msg",
+    `<summary>${ic("fork")}<span class="sub-title">子任务</span><span class="sub-state"></span>${ic("chev", "chev")}</summary><div class="sub-body"></div>`);
+  const anchor = after ?? (main.lastTool?.dataset.name === "spawn" ? main.lastTool : null);
+  if (anchor) anchor.after(node);
+  else add(main, node);
+  const b = { node, pane: pane(q(node, ".sub-body")), loaded: !after };
+  // 回放出来的块是空的：第一次点开才去读它的会话
+  if (after) node.addEventListener("toggle", () => { if (node.open && !b.loaded) loadSub(sid, b); });
+  subs.set(sid, b);
+  follow();
+  return b;
+}
+
+async function loadSub(sid: string, b: { pane: Pane; loaded: boolean }) {
+  b.loaded = true;
+  const frames = await call<Replayed[]>("GET", "/session", { session_id: sid });
+  if (Array.isArray(frames)) for (const f of frames) render(b.pane, { event: f.type, data: f.data } as Frame, true);
+  endAll(b.pane);
+}
+
+function subState(b: { node: HTMLDetailsElement }, text: string) {
+  q(b.node, ".sub-state").textContent = text;
 }
 
 // ==================== 读秒行 ====================
@@ -225,74 +271,86 @@ function renderStatus() {
 // ==================== 事件 ====================
 
 function handle(f: Frame, replay = false) {
-  const aid = "agent_id" in f.data ? f.data.agent_id : undefined;
-  // 侧栏的运行态看所有 agent，不只看当前这个
-  if (aid && f.event === "agent_start") setAgentState(aid, "running");
-  if (aid && f.event === "agent_end") setAgentState(aid, "idle");
+  const { root, session_id: sid } = f.data as Who;
+  if (root && sid === root && (f.event === "agent_start" || f.event === "agent_end")) setRunning(root, f.event === "agent_start");
   if (f.event === "permission_request") return addApproval(f.data);
   if (f.event === "statusline") return setModel(f.data.model);
-  if (aid && aid !== S.agentId) return;
+  if (!root) return render(main, f, replay); // 回放出来的帧：已经按对话取过了
+  if (root !== S.sessionId) return;
+  if (sid && sid !== root) return render(subBlock(sid).pane, f, replay);
+  render(main, f, replay);
+}
 
+// 一帧画进一块。读秒、收工、回顾这些只归主对话：子 agent 收工不是这段对话收工
+function render(p: Pane, f: Frame, replay: boolean) {
+  const top = p === main && !replay;
+  const sub = [...subs.values()].find((b) => b.pane === p);
   switch (f.event) {
     case "message_start":
-      endAll();
-      if (f.data.text) userMsg(f.data.text);
+      endAll(p);
+      if (!f.data.text) break;
+      if (sub && !sub.pane.host.childElementCount) q(sub.node, ".sub-title").textContent = f.data.text.split("\n")[0];
+      userMsg(p, f.data.text);
       break;
     case "agent_start":
     case "turn_start":
     case "thinking_start":
-      endText();
-      if (!replay) busy("思考中");
+      endText(p);
+      if (top) busy("思考中");
+      if (sub && !replay) subState(sub, "运行中");
       break;
     case "thinking_update":
-      thinkAppend(f.data.delta ?? "", replay);
+      thinkAppend(p, f.data.delta ?? "", replay);
       break;
     case "thinking_stop":
-      endThink();
+      endThink(p);
       break;
     case "message_update":
-      endThink();
-      textAppend(f.data.delta ?? "", replay);
-      if (!replay) busy("生成回复");
+      endThink(p);
+      textAppend(p, f.data.delta ?? "", replay);
+      if (top) busy("生成回复");
       break;
     case "message_end":
-      endText();
+      endText(p);
       break;
     case "tool_execution_start":
-      endAll();
-      toolStart(f.data);
-      if (!replay) busy(toolVerb(f.data.name));
+      endAll(p);
+      toolStart(p, f.data);
+      if (top) busy(toolVerb(f.data.name));
       break;
     case "tool_output":
-      toolOut(f.data, replay);
+      toolOut(p, f.data, replay);
       break;
     case "tool_execution_end":
-      toolEnd(f.data);
-      if (!replay) busy("思考中");
+      toolEnd(p, f.data);
+      if (top) busy("思考中");
       break;
     case "status_update":
+      if (p !== main) break;
       if (f.data.cost != null) S.cost = f.data.cost;
       renderStatus();
       break;
     case "turn_end":
-      endAll();
-      if (f.data.error) alertMsg(f.data.error);
+      endAll(p);
+      if (f.data.error) alertMsg(p, f.data.error);
       break;
     case "interrupted":
+      endAll(p);
+      for (const c of p.tools.values()) if (c.dataset.state === "run" || c.dataset.state === "wait") setToolState(c, "stop");
+      if (sub) subState(sub, "已中断");
+      if (p !== main) break;
       S.interrupted = true;
-      endAll();
-      for (const c of view.tools.values()) if (c.dataset.state === "run" || c.dataset.state === "wait") setToolState(c, "stop");
-      dropApprovals(S.agentId);
+      dropApprovals(S.sessionId);
       break;
     case "agent_end": {
-      endAll();
-      if (f.data.recap) add(el("div", "recap msg", '<div class="recap-head">回顾</div>')).append(f.data.recap);
+      endAll(p);
+      if (sub) { subState(sub, "完成"); break; }
+      if (f.data.recap) add(main, el("div", "recap msg", '<div class="recap-head">回顾</div>')).append(f.data.recap);
       const parts = [S.interrupted ? "已中断" : "完成"];
       if (S.since) parts.push(`${elapsed()} 秒`);
       if (f.data.cost) parts.push(money(f.data.cost));
       notice(parts.join(" · "));
       idle();
-      refreshSessions();
       break;
     }
   }
@@ -300,19 +358,32 @@ function handle(f: Frame, replay = false) {
 
 // ==================== 审批 ====================
 
+// 审批卡片挂在哪张工具卡片上：当前对话本身，或它的某个子 agent；别的对话的没有卡片可挂
+function paneOf(w: Who): Pane | undefined {
+  if (!w.root || w.root !== S.sessionId) return undefined;
+  return w.session_id === w.root ? main : subs.get(w.session_id ?? "")?.pane;
+}
+
 function addApproval(a: Approval) {
   S.approvals.push(a);
-  if (a.agent_id === S.agentId && view.lastTool?.dataset.state === "run") {
-    q(view.lastTool, ".tool-label").textContent = toolSummary(a.params);
-    setToolState(view.lastTool, "wait");
-    busy("等待你的审批");
+  const p = paneOf(a);
+  if (p && p.lastTool?.dataset.state === "run") {
+    q(p.lastTool, ".tool-label").textContent = toolSummary(a.params);
+    setToolState(p.lastTool, "wait");
+    if (p === main) busy("等待你的审批");
   }
   renderApprovals();
 }
 
-function dropApprovals(agentId: number) {
-  S.approvals = S.approvals.filter((a) => a.agent_id !== agentId);
+// 中断是整段对话的事：它和它派生出去的一起停，挂着的审批一起掐掉
+function dropApprovals(root: string) {
+  S.approvals = S.approvals.filter((a) => a.root !== root);
   renderApprovals();
+}
+
+function whoAsks(a: Approval): string {
+  if (a.root !== S.sessionId) return "另一段对话";
+  return a.session_id === a.root ? "" : "子任务";
 }
 
 function renderApprovals() {
@@ -323,7 +394,7 @@ function renderApprovals() {
       `<div class="approval-head">${ic("shield")}<span></span><span class="who"></span></div><pre class="mono"></pre>` +
       `<div class="approval-actions"><button class="btn btn-secondary btn-sm">拒绝</button><button class="btn btn-primary btn-sm">允许</button></div>`);
     q(card, ".approval-head span").textContent = `${toolVerb(a.tool)}需要你的允许`;
-    q(card, ".who").textContent = `agent ${a.agent_id} · ${a.tool}`;
+    q(card, ".who").textContent = [whoAsks(a), a.tool].filter(Boolean).join(" · ");
     q(card, "pre").textContent = typeof a.params?.command === "string" ? a.params.command : JSON.stringify(a.params, null, 2);
     const [deny, allow] = card.querySelectorAll("button");
     deny.onclick = () => decide(a, false);
@@ -335,114 +406,91 @@ function renderApprovals() {
 async function decide(a: Approval, allow: boolean) {
   S.approvals = S.approvals.filter((x) => x !== a);
   renderApprovals();
-  if (a.agent_id === S.agentId && view.lastTool?.dataset.state === "wait") {
-    setToolState(view.lastTool, allow ? "run" : "fail");
-    busy(allow ? toolVerb(a.tool) : "思考中");
+  const p = paneOf(a);
+  if (p && p.lastTool?.dataset.state === "wait") {
+    setToolState(p.lastTool, allow ? "run" : "fail");
+    if (p === main) busy(allow ? toolVerb(a.tool) : "思考中");
   }
   const r = await call<Reply>("POST", "/approval-response", { id: a.id, allow });
   if (r.error) toast("审批回传失败：" + r.error);
 }
 
-// ==================== agent 与会话（侧栏） ====================
+// ==================== 对话（侧栏） ====================
 
-async function refreshAgents() {
-  const list = await call<Agent[]>("GET", "/agents");
+async function refreshSessions() {
+  const list = await call<Session[]>("GET", "/sessions");
   if (!Array.isArray(list)) return;
-  S.agents = new Map(list.map((a) => [a.id, a]));
-  renderAgents();
+  S.sessions = list;
+  renderSessions();
 }
 
-function setAgentState(id: number, state: string) {
-  const a = S.agents.get(id);
-  if (!a) return void refreshAgents(); // spawn 出来的新 agent
-  a.state = state;
-  renderAgents();
+// 侧栏的运行态看这个目录下的所有对话，不只看当前这段
+function setRunning(root: string, on: boolean) {
+  const s = S.sessions.find((x) => x.id === root);
+  if (s) s.state = on ? "running" : "";
+  renderSessions();
+  if (!s || !on) refreshSessions(); // 刚开出来的对话；跑完了条数也变了
 }
 
-function renderAgents() {
-  const nav = $("agent-list");
+function renderSessions() {
+  const nav = $("session-list");
   nav.textContent = "";
-  for (const a of S.agents.values()) {
-    const b = el("button", "nav-item" + (a.id === S.agentId ? " active" : ""),
-      `<span class="agent-dot ${a.state === "running" ? "running" : ""}"></span>` +
-      `<span class="grow"><span class="line1">Agent ${a.id}</span><span class="line2 mono"></span></span>`);
-    q(b, ".line2").textContent = basename(a.workdir);
-    b.title = a.workdir;
-    if (a.in_edges?.length) b.append(el("span", "nav-meta", `子 · ${a.in_edges.join(",")}`));
-    b.onclick = () => attach(a.id);
+  if (!S.sessions.length) nav.innerHTML = '<div class="side-note">还没有对话</div>';
+  for (const s of S.sessions) {
+    const mine = s.id === S.sessionId;
+    const elsewhere = s.state === "elsewhere";
+    const b = el("button", "nav-item" + (mine ? " active" : ""),
+      `<span class="agent-dot ${s.state === "running" ? "running" : ""}"></span>` +
+      '<span class="grow"><span class="line1"></span><span class="line2"></span></span>');
+    q(b, ".line1").textContent = s.title || "空对话";
+    q(b, ".line2").textContent = elsewhere ? "在别的窗口里开着" : `${s.messages} 条 · ${ago(s.mtime)}`;
+    b.disabled = elsewhere;
+    if (!mine && !elsewhere) b.onclick = () => openConversation(s.id);
     nav.append(b);
   }
   renderTop();
 }
 
 function renderTop() {
-  const a = S.agents.get(S.agentId);
-  $("top-name").textContent = a ? `Agent ${a.id}` : "—";
-  $("top-dir-text").textContent = a ? shortPath(a.workdir) : "";
-  $("top-dir").title = a?.workdir ?? "";
-  $("empty-agent").textContent = a ? `Agent ${a.id}` : "agent";
-  $("empty-dir").textContent = a ? basename(a.workdir) : "";
-  $("top-state").hidden = a?.state !== "running";
-}
-
-async function refreshSessions() {
-  if (!S.agentId) return;
-  const r = await call<Session[] | Reply>("GET", "/sessions");
-  if (Array.isArray(r)) renderSessions(r);
-  else if (!$("session-list").children.length) $("session-list").innerHTML = '<div class="side-note">agent 运行中，稍后再看</div>';
-}
-
-function renderSessions(list: Session[] = []) {
-  const nav = $("session-list");
-  nav.textContent = "";
-  if (!list.length) nav.innerHTML = '<div class="side-note">还没有会话</div>';
-  for (const s of list) {
-    const mine = s.opened_by === S.agentId;
-    const other = s.opened_by != null && !mine;
-    const b = el("button", "nav-item" + (mine ? " active" : ""),
-      '<span class="grow"><span class="line1"></span><span class="line2"></span></span>');
-    q(b, ".line1").textContent = s.title || "空会话";
-    q(b, ".line2").textContent = other ? `Agent ${s.opened_by} 打开着` : `${s.messages} 条 · ${ago(s.mtime)}`;
-    b.disabled = other;
-    if (!mine && !other) b.onclick = () => resumeSession(s.id);
-    nav.append(b);
-  }
-}
-
-async function resumeSession(id: string) {
-  const r = await call<Reply<Session[]>>("POST", "/session", { id });
-  if (!r.ok) return toast(r.error || "恢复失败");
-  renderSessions(r.data);
-  await loadHistory();
-  closeSidebar();
-}
-
-async function newSession() {
-  const r = await call<Reply<Session[]>>("POST", "/session");
-  if (!r.ok) return toast(r.error || "新建失败");
-  clearThread();
-  renderSessions(r.data);
-  closeSidebar();
+  const s = S.sessions.find((x) => x.id === S.sessionId);
+  $("top-name").textContent = s?.title || "新对话";
+  $("top-dir-text").textContent = shortPath(S.workdir);
+  $("top-dir").title = S.workdir;
+  $("empty-dir").textContent = basename(S.workdir);
+  $("top-state").hidden = s?.state !== "running";
 }
 
 async function loadHistory() {
   clearThread();
   const frames = await call<Replayed[]>("GET", "/session");
   if (Array.isArray(frames)) for (const f of frames) handle({ event: f.type, data: f.data } as Frame, true);
-  endAll();
+  endAll(main);
   wrap.scrollTop = wrap.scrollHeight;
 }
 
-async function attach(id: number) {
-  S.agentId = id;
+// 换一段对话：原来那段在 core 里照跑，回来时从盘上读得到
+async function openConversation(id: string) {
+  S.sessionId = id;
   idle();
-  renderAgents();
+  renderSessions();
   closeSidebar();
   await loadHistory();
-  if (S.agents.get(id)?.state === "running") busy("运行中");
-  refreshSessions();
-  call<Command[]>("GET", "/commands").then((c) => { if (Array.isArray(c)) S.commands = c; });
+  if (S.sessions.find((x) => x.id === id)?.state === "running") busy("运行中");
   input.focus();
+}
+
+function newConversation() {
+  S.sessionId = crypto.randomUUID();
+  idle();
+  clearThread();
+  renderSessions();
+  closeSidebar();
+  input.focus();
+}
+
+async function refreshCommands() {
+  const c = await call<Command[]>("GET", "/commands");
+  S.commands = [...LOCAL, ...(Array.isArray(c) ? c : [])];
 }
 
 // ==================== 模型 ====================
@@ -541,30 +589,32 @@ async function submit() {
   if (text.startsWith("/")) return runCommand(text);
   stick = true;
   busy("发送中"); // 读秒从按下 Enter 起算；正文由 core 的 message_start 帧画
-  const r = await call<Reply>("POST", "/message", { message: text }).catch((e): Reply => ({ error: String(e) }));
+  const r = await post(text);
   if (r.error) {
-    alertMsg(r.error);
+    alertMsg(main, r.error);
     idle();
   }
 }
 
-// 斜杠命令直接回结果，不启动 agent turn。无参的 /model /resume 列成可点的清单
+const post = (text: string) =>
+  call<Reply>("POST", "/message", { message: text }).catch((e): Reply => ({ error: String(e) }));
+
+// 斜杠命令直接回结果，不启动 turn；plugin 的 prompt 命令展开后就是一条消息。无参的 /model /resume 列成可点的清单
 async function runCommand(text: string) {
-  const r = await call<Reply>("POST", "/message", { message: text }).catch((e): Reply => ({ error: String(e) }));
+  const [cmd, arg] = text.split(/\s+/);
+  if (cmd === "/new") return newConversation();
+  if (cmd === "/resume") {
+    if (arg) return openConversation(arg);
+    await refreshSessions();
+    return cmdList(text, S.sessions.filter((s) => s.state !== "elsewhere"), (s) => [s.title || "空对话", `${s.messages} 条`], (s) => openConversation(s.id));
+  }
+  const r = await post(text);
+  if (r.status === "processing") return busy("发送中");
   if (!r.ok) return toast(r.error || "命令失败");
-  const arg = text.split(/\s+/)[1];
-  if (r.command === "new") {
-    clearThread();
-    renderSessions(r.data as Session[]);
-  } else if (r.command === "resume") {
-    const list = r.data as Session[];
-    renderSessions(list);
-    if (arg) await loadHistory();
-    else cmdList(text, list, (s) => [s.title || "空会话", `${s.messages} 条`], (s) => resumeSession(s.id));
-  } else if (r.command === "model") {
+  if (r.command === "model") {
     if (!arg) cmdList(text, r.data as Model[], (m) => [m.name, m.current ? "当前" : m.owned_by ?? ""], (m) => runCommand("/model " + m.name));
   } else if (r.data != null) {
-    const box = add(el("div", "cmd-result msg", '<div class="cmd-result-head"></div><pre class="mono"></pre>'));
+    const box = add(main, el("div", "cmd-result msg", '<div class="cmd-result-head"></div><pre class="mono"></pre>'));
     q(box, ".cmd-result-head").textContent = text;
     q(box, "pre").textContent = JSON.stringify(r.data, null, 2);
   } else {
@@ -573,7 +623,7 @@ async function runCommand(text: string) {
 }
 
 function cmdList<T>(title: string, items: T[] = [], label: (it: T) => [string, string], pick: (it: T) => void) {
-  const box = add(el("div", "cmd-result msg", '<div class="cmd-result-head"></div>'));
+  const box = add(main, el("div", "cmd-result msg", '<div class="cmd-result-head"></div>'));
   q(box, ".cmd-result-head").textContent = title;
   for (const it of items) {
     const [a, b] = label(it);
@@ -591,26 +641,6 @@ function interrupt() {
   renderStatus();
   call("POST", "/interrupt");
 }
-
-// ==================== 新建 agent ====================
-
-const agentDir = $<HTMLInputElement>("agent-dir");
-
-function openModal() {
-  agentDir.value = S.agents.get(S.agentId)?.workdir ?? S.workdir;
-  $("modal").hidden = false;
-  agentDir.select();
-}
-const closeModal = () => ($("modal").hidden = true);
-
-$<HTMLFormElement>("agent-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const r = await call<Reply>("POST", "/agent", { workdir: agentDir.value.trim() });
-  if (!r.agent_id) return toast(r.error || "建 agent 失败");
-  closeModal();
-  await refreshAgents();
-  attach(r.agent_id);
-};
 
 // ==================== 主题 ====================
 
@@ -650,9 +680,7 @@ function closeSidebar() {
 
 $("menu").onclick = () => { $("sidebar").classList.add("open"); $("scrim").classList.add("open"); };
 $("scrim").onclick = closeSidebar;
-$("new-agent").onclick = openModal;
-$("agent-cancel").onclick = closeModal;
-$("new-session").onclick = newSession;
+$("new-session").onclick = newConversation;
 $("send").onclick = submit;
 $("stop").onclick = interrupt;
 $("model-btn").onclick = openModelMenu;
@@ -676,7 +704,6 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!$("modal").hidden) return closeModal();
   if (!$("model-menu").hidden) return void ($("model-menu").hidden = true);
   if (slashMatches().length) { S.slashHidden = true; return renderSlash(); }
   interrupt();
@@ -692,7 +719,7 @@ let everOpen = false;
 function onConn(ok: boolean) {
   setConn(ok);
   if (!ok) return;
-  if (everOpen && S.agentId) refreshAgents().then(() => attach(S.agentId));
+  if (everOpen) refreshSessions().then(() => openConversation(S.sessionId));
   everOpen = true;
 }
 
@@ -703,11 +730,10 @@ function onConn(ok: boolean) {
   if ((await core.setupForced()) || !cfg.setup_done) await setup(cfg);
   S.workdir = await core.workdir();
   await core.subscribe(handle, onConn);
-  const r = await call<Reply>("POST", "/agent", { workdir: S.workdir });
-  if (!r.agent_id) throw new Error(r.error || "建 agent 失败");
   setModel((await call<Statusline>("GET", "/statusline")).model);
-  await refreshAgents();
-  await attach(r.agent_id);
+  // 起步是一段新对话：第一条消息发出去，core 才开出它
+  newConversation();
+  await Promise.all([refreshSessions(), refreshCommands()]);
 })().catch((e) => {
   setConn(false);
   toast("连不上 core：" + (e instanceof Error ? e.message : String(e)) + "\n先运行 make run");

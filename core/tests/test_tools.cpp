@@ -355,10 +355,9 @@ int main()
         Config cfg = config_with("allow-all");
         ApprovalCoordinator ap;
         int asked = 0;
-        ap.set_emit([&asked](const std::string &t, const std::string &) {
-            if (t == "permission_request") ++asked;
-        });
-        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        CoreContext ctx{.config = &cfg, .emit_fn = [&asked](const std::string &t, const std::string &) {
+                            if (t == "permission_request") ++asked;
+                        }};
         Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c1", "bash", R"({"command":"echo allow"})");
         CHECK(st(r) == 0 && msg(r) == "allow\n", "allow-all → 危险工具照跑");
@@ -369,10 +368,9 @@ int main()
         Config cfg = config_with("deny");
         ApprovalCoordinator ap;
         int asked = 0;
-        ap.set_emit([&asked](const std::string &t, const std::string &) {
-            if (t == "permission_request") ++asked;
-        });
-        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        CoreContext ctx{.config = &cfg, .emit_fn = [&asked](const std::string &t, const std::string &) {
+                            if (t == "permission_request") ++asked;
+                        }};
         Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c2", "bash", R"({"command":"echo nope"})");
         CHECK(st(r) != 0 && msg(r).find("permission policy") != std::string::npos,
@@ -389,13 +387,12 @@ int main()
         Config cfg = config_with("ask");
         ApprovalCoordinator ap;
         std::string seen_tool;
-        ap.set_emit([&ap, &seen_tool](const std::string &t, const std::string &payload) {
-            if (t != "permission_request") return;
-            const json ev = json::parse(payload);
-            seen_tool = ev["tool"];
-            ap.respond(ev["id"], true);
-        });
-        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        CoreContext ctx{.config = &cfg, .emit_fn = [&ap, &seen_tool](const std::string &t, const std::string &payload) {
+                            if (t != "permission_request") return;
+                            const json ev = json::parse(payload);
+                            seen_tool = ev["tool"];
+                            ap.respond(ev["id"], true);
+                        }};
         Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c4", "bash", R"({"command":"echo asked"})");
         CHECK(seen_tool == "bash", "ask → 发出 permission_request，点名是哪个工具");
@@ -404,12 +401,11 @@ int main()
     {
         Config cfg = config_with("ask");
         ApprovalCoordinator ap;
-        ap.set_emit([&ap](const std::string &t, const std::string &payload) {
-            if (t != "permission_request") return;
-            const json ev = json::parse(payload);
-            ap.respond(ev["id"], false);
-        });
-        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        CoreContext ctx{.config = &cfg, .emit_fn = [&ap](const std::string &t, const std::string &payload) {
+                            if (t != "permission_request") return;
+                            const json ev = json::parse(payload);
+                            ap.respond(ev["id"], false);
+                        }};
         Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c5", "bash", R"({"command":"echo denied"})");
         CHECK(st(r) != 0 && msg(r).find("denied by user") != std::string::npos,
@@ -420,13 +416,12 @@ int main()
         Config cfg = config_with("yolo");
         ApprovalCoordinator ap;
         int asked = 0;
-        ap.set_emit([&ap, &asked](const std::string &t, const std::string &payload) {
-            if (t != "permission_request") return;
-            ++asked;
-            const json ev = json::parse(payload);
-            ap.respond(ev["id"], false);
-        });
-        CoreContext ctx{.config = &cfg, .emit_fn = nullptr};
+        CoreContext ctx{.config = &cfg, .emit_fn = [&ap, &asked](const std::string &t, const std::string &payload) {
+                            if (t != "permission_request") return;
+                            ++asked;
+                            const json ev = json::parse(payload);
+                            ap.respond(ev["id"], false);
+                        }};
         Executor exe(ctx, ap, g_home.string());
         const auto r = exe.execute("c6", "bash", R"({"command":"echo yolo"})");
         CHECK(asked == 1, "permission 值认不出 → 走 ask，不是放行");

@@ -1,7 +1,5 @@
 #include "agent/command.hpp"
 
-#include <algorithm>
-
 #include "agent/catalog.hpp"
 #include "agent/session.hpp"
 #include "llm/llm.hpp"
@@ -27,26 +25,15 @@ static nlohmann::json models_payload(const CoreContext &ctx)
     return arr;
 }
 
-/* 刚打开的会话可能还没落盘、不在扫描结果里：补一条进去。 */
-nlohmann::json sessions_payload(const Agents &pool, const Agent &agent)
+nlohmann::json sessions_payload(const Agents &pool, const std::string &client,
+                                const std::string &workdir)
 {
-    const std::map<std::string, int> opened = pool.openers();
     nlohmann::json arr = nlohmann::json::array();
-    bool seen_self = false;
-    for (const auto &s : Session::list(agent.session_dir()))
+    for (const auto &s : Session::list(sessions_dir(workdir)))
     {
         nlohmann::json e = s;
-        const auto it = opened.find(s.id);
-        e["opened_by"] = it != opened.end() ? nlohmann::json(it->second) : nlohmann::json();
-        seen_self = seen_self || s.id == agent.session_id();
+        e["state"] = pool.state(client, s.id);
         arr.push_back(std::move(e));
-    }
-    if (!seen_self)
-    {
-        nlohmann::json e = SessionInfo{.id = agent.session_id()};
-        e["opened_by"] = agent.id();
-        arr.push_back(std::move(e)); // 新会话还没写过盘，排在最前（它最新）
-        std::rotate(arr.begin(), arr.end() - 1, arr.end());
     }
     return arr;
 }
@@ -69,32 +56,17 @@ nlohmann::json statusline_payload(const CoreContext &ctx)
 
 namespace {
 
-/* 一条命令跑起来要够到的三样东西 */
+/* 一条命令跑起来要够到的东西。agent 可能为空：这段对话还没开过。 */
 struct Env {
     CoreContext &ctx;
-    Agents &pool;
-    Agent &agent;
+    const std::string &workdir;
+    const Agent *agent;
 };
 
 /* 成功载荷：{"ok":true,"command":name,"data":data} */
 std::string ok_json(const char *name, nlohmann::json data)
 {
     return nlohmann::json{{"ok", true}, {"command", name}, {"data", std::move(data)}}.dump();
-}
-
-std::string cmd_new(Env &e, const std::string &)
-{
-    e.agent.reset();
-    e.agent.session_start_hook("clear");
-    return ok_json("new", sessions_payload(e.pool, e.agent));
-}
-
-std::string cmd_resume(Env &e, const std::string &arg)
-{
-    // 无参 = 列会话；带 id = 恢复那一个，失败时原会话不动
-    if (!arg.empty() && !e.agent.resume(arg)) return command_error("unknown session: " + arg);
-    if (!arg.empty()) e.agent.session_start_hook("resume");
-    return ok_json("resume", sessions_payload(e.pool, e.agent));
 }
 
 std::string cmd_model(Env &e, const std::string &arg)
@@ -117,7 +89,7 @@ std::string cmd_model(Env &e, const std::string &arg)
 std::string cmd_plugins(Env &e, const std::string &)
 {
     nlohmann::json arr = nlohmann::json::array();
-    for (const PluginInfo &p : plugin_infos(e.agent.workdir()))
+    for (const PluginInfo &p : plugin_infos(e.workdir))
     {
         // 什么都没带的隐式 plugin 不列
         if (p.implicit && !p.skills && !p.commands && !p.agent_defs && !p.mcp_servers && !p.hooks)
@@ -134,7 +106,8 @@ std::string cmd_plugins(Env &e, const std::string &)
                                      {"hooks", p.hooks}});
     }
     nlohmann::json errors = nlohmann::json::array();
-    for (const std::string &m : e.agent.plugin_errors()) errors.push_back(m);
+    if (e.agent)
+        for (const std::string &m : e.agent->plugin_errors()) errors.push_back(m);
     return ok_json("plugins", nlohmann::json{{"plugins", arr}, {"errors", errors}});
 }
 
@@ -146,8 +119,6 @@ struct CommandDef {
 
 /* 全部命令。清单与派发都读这张表，加一条命令就是加一行。 */
 constexpr CommandDef kCommands[] = {
-    {"new", "新建会话（清空当前对话，旧会话留在盘上）", cmd_new},
-    {"resume", "查看会话列表（/resume <id> 恢复某个会话）", cmd_resume},
     {"model", "查看模型清单（/model <name> 切换主模型）", cmd_model},
     {"plugins", "查看装了哪些 plugin、各带了什么（只读；装 = git clone 进目录，卸 = 删掉）",
      cmd_plugins},
@@ -157,19 +128,19 @@ constexpr CommandDef kCommands[] = {
 
 bool is_builtin_command(const std::string &name)
 {
+    if (name == "new" || name == "resume") return true; // 客户端就地处理，从不发到 core
     for (const CommandDef &c : kCommands)
         if (name == c.name) return true;
     return false;
 }
 
-nlohmann::json command_defs(const Agent *agent)
+nlohmann::json command_defs(const std::string &workdir)
 {
     nlohmann::json arr = nlohmann::json::array();
     for (const CommandDef &c : kCommands)
         arr.push_back(
             nlohmann::json{{"name", c.name}, {"description", c.description}, {"kind", "builtin"}});
-    if (!agent) return arr; // prompt 命令跟着 workdir 走
-    for (const PromptCommand &c : agent->commands())
+    for (const PromptCommand &c : scan_commands(workdir))
         arr.push_back(nlohmann::json{{"name", c.name},
                                      {"description", c.description},
                                      {"argument_hint", c.argument_hint},
@@ -177,34 +148,25 @@ nlohmann::json command_defs(const Agent *agent)
     return arr;
 }
 
-std::string handle_command(CoreContext &ctx, Agents &pool, Agent &agent,
+CommandOutcome run_command(CoreContext &ctx, const std::string &workdir, const Agent *agent,
                            const std::string &input)
 {
-    // 首空白分词为命令名：/resume[ <id>]、/model[ <name>]
+    // 首空白分词为命令名：/model[ <name>]
     const std::string cmd = input.substr(0, input.find(' '));
     // 命令参数：命令名之后去掉尾部空白的那一段（无参即空串）
     std::string arg = input.size() > cmd.size() ? input.substr(cmd.size() + 1) : std::string();
     while (!arg.empty() && arg.back() == ' ') arg.pop_back();
     const std::string name = cmd.substr(1); // 去掉前导 '/'
 
-    // builtin：拿锁，拿不到回 AGENT_BUSY
     for (const CommandDef &c : kCommands)
         if (name == c.name)
         {
-            auto lk = agent.try_lock();
-            if (!lk.owns_lock()) return command_error(AGENT_BUSY);
-            Env env{ctx, pool, agent};
-            return c.run(env, arg);
+            Env env{ctx, workdir, agent};
+            return {.reply = c.run(env, arg)};
         }
-
-    // prompt：等价于用户打了一段字，不拿锁
-    for (const PromptCommand &c : agent.commands())
-        if (name == c.name)
-        {
-            agent.post(expand_arguments(c.body, arg));
-            return std::string("{\"status\":\"processing\"}");
-        }
-    return command_error("unknown command: " + cmd);
+    for (const PromptCommand &c : scan_commands(workdir))
+        if (name == c.name) return {.post = expand_arguments(c.body, arg)};
+    return {.reply = command_error("unknown command: " + cmd)};
 }
 
 } // namespace realagent

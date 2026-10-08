@@ -50,33 +50,73 @@ void Server::route(const std::string &method, const std::string &path, Handler h
         http_.Post(path, serve);
 }
 
+namespace {
+std::string frame_of(const std::string &type, const std::string &payload)
+{
+    return R"({"event":")" + type + R"(","data":)" + payload + "}";
+}
+} // namespace
+
 void Server::push_event(const std::string &type, const std::string &payload)
 {
-    const std::string frame = R"({"event":")" + type + R"(","data":)" + payload + "}";
+    const std::string frame = frame_of(type, payload);
     std::lock_guard<std::mutex> lk(conns_mtx_);
-    for (httplib::ws::WebSocket *ws : conns_) ws->send(frame);
+    for (const auto &[ws, _] : conns_) ws->send(frame);
 }
 
-bool Server::has_client()
+void Server::push_to(const std::string &client, const std::string &type, const std::string &payload)
+{
+    const std::string frame = frame_of(type, payload);
+    std::lock_guard<std::mutex> lk(conns_mtx_);
+    for (const auto &[ws, c] : conns_)
+        if (c == client) ws->send(frame);
+}
+
+bool Server::has_client(const std::string &client)
 {
     std::lock_guard<std::mutex> lk(conns_mtx_);
-    return !conns_.empty();
+    for (const auto &[_, c] : conns_)
+        if (c == client) return true;
+    return false;
+}
+
+std::vector<std::string> Server::gone_for(std::chrono::seconds age)
+{
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<std::string> out;
+    std::lock_guard<std::mutex> lk(conns_mtx_);
+    for (auto it = left_.begin(); it != left_.end();)
+    {
+        if (now - it->second < age)
+        {
+            ++it;
+            continue;
+        }
+        out.push_back(it->first);
+        it = left_.erase(it);
+    }
+    return out;
 }
 
 bool Server::run(int port)
 {
-    http_.WebSocket("/events", [this](const httplib::Request &, httplib::ws::WebSocket &ws) {
+    http_.WebSocket("/events", [this](const httplib::Request &req, httplib::ws::WebSocket &ws) {
         // 不设的话 300 秒收不到客户端的帧就断，而客户端从不发帧；它走了，读自己会失败
         ws.set_read_timeout(0);
+        const std::string client = req.get_param_value("client_id");
         {
             std::lock_guard<std::mutex> lk(conns_mtx_);
-            conns_.insert(&ws);
+            conns_[&ws] = client;
+            left_.erase(client); // 回来了：撤销关组的倒计时
         }
         for (std::string msg; ws.read(msg) != httplib::ws::Fail;)
         {
         }
         std::lock_guard<std::mutex> lk(conns_mtx_);
         conns_.erase(&ws);
+        for (const auto &[_, c] : conns_)
+            if (c == client) return; // 同一个客户端还有别的连接
+        left_[client] = std::chrono::steady_clock::now();
     });
     // 在 WebSocket 升级之前也跑
     http_.set_pre_routing_handler(check_origin);

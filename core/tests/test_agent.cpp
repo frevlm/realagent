@@ -95,6 +95,7 @@ int main()
     }
     CoreContext ctx{.config = &*cfg, .pricing = nullptr, .emit_fn = nullptr};
     ApprovalCoordinator approval;
+    const ContextOf ctx_of = [&ctx](const std::string &) { return ctx; };
 
     printf("== 空收件箱时析构不挂 ==\n");
     {
@@ -147,39 +148,118 @@ int main()
     }
     CHECK(true, "带着未处理的消息析构，也 join 得回来");
 
-    printf("== 图：创建与边结构 ==\n");
+    // 客户端开一段新对话（id 由客户端给），回它在图里的 id
+    int conv = 0;
+    const auto top = [&home, &conv](Agents &pool, const std::string &client) {
+        std::string err;
+        const auto a = pool.open(client, home.string(), "c" + std::to_string(++conv), err);
+        return a ? a->id() : 0;
+    };
+
+    printf("== 图：派生与边结构 ==\n");
     {
-        Agents pool(ctx, approval);
+        Agents pool(ctx_of, approval);
         std::string err;
 
-        CHECK(pool.create("", 0, {}, {}, err) == 0 && !err.empty(), "workdir 必填");
+        CHECK(pool.open("", "", "c0", err) == nullptr && !err.empty(), "workdir 必填");
 
-        const int a = pool.create(home.string(), 0, {}, {}, err);
-        CHECK(a > 0, "建得出第一个 agent");
+        const int a = top(pool, "");
+        CHECK(a > 0, "开得出第一段对话");
 
-        // a 派生 b，入边填 a
-        const int b = pool.create(home.string(), a, {a}, {}, err);
+        const int b = pool.spawn(a, home.string(), {a}, {}, err); // a → b
         CHECK(b > 0 && err.empty(), "a 派生 b，并建立入边");
 
-        const int c = pool.create(home.string(), a, {}, {}, err);
-        CHECK(c > 0, "a 再派生一个 c");
+        CHECK(!pool.send(a, 999, "x"), "投给不存在的 agent 返回 false");
+        CHECK(pool.send(a, b, "干活"), "a → b 有边，投得进去");
+    }
 
-        CHECK(!pool.post(999, "x"), "投给不存在的 agent 返回 false");
-        CHECK(pool.post(b, "干活"), "投得进去");
-        CHECK(pool.list().size() == 3, "清单列出全部节点");
+    printf("== 能力模型：没有边就够不着，授不出自己没有的边（ADR-0019 §4b） ==\n");
+    {
+        Agents pool(ctx_of, approval);
+        std::string err;
+        const int a = top(pool, "");
+        const int b = pool.spawn(a, home.string(), {}, {}, err);  // 派出去不管：a 不认识 b
+        const int c = pool.spawn(a, home.string(), {a}, {}, err); // a → c
+
+        CHECK(!pool.send(a, b, "x") && pool.send(a, c, "x"), "没有边就跟不存在一样；有边投得进去");
+
+        CHECK(pool.spawn(a, home.string(), {b}, {}, err) == 0 && !err.empty(),
+              "a 不认识 b，就不能让 b 认识新 agent");
+        CHECK(pool.spawn(a, home.string(), {}, {b}, err) == 0 && !err.empty(),
+              "a 不认识 b，就不能把 b 授给新 agent");
+
+        const int d = pool.spawn(a, home.string(), {a, c}, {a, c}, err);
+        CHECK(d > 0 && err.empty(), "授自己、授自己认识的：teamwork 形态建得出");
+    }
+
+    printf("== 对话：客户端只用 session_id 指它（ADR-0029） ==\n");
+    {
+        Agents pool(ctx_of, approval);
+        std::string err;
+        const auto a = pool.open("w", home.string(), "talk", err);
+        CHECK(a && pool.open("w", home.string(), "talk", err) == a, "同一段对话再来：还是那一个 agent");
+        CHECK(pool.open("w", home.string(), "../x", err) == nullptr, "id 不许带路径");
+
+        a->post("记一条");
+        CHECK(wait_messages(*a, 1), "落盘了");
+        pool.close_group("w");
+        const auto again = pool.open("w2", home.string(), "talk", err);
+        CHECK(again && wait_messages(*again, 1), "关掉后再来：从盘上读回来，接着那段往下说");
+        CHECK(pool.open("w3", home.string(), "talk", err) == nullptr && !err.empty(),
+              "在别的窗口里开着：不许再开一个往同一个文件里写");
+        CHECK(pool.state("w3", "talk") == "elsewhere", "清单里看得出它在别的窗口里开着");
+
+        const int child = pool.spawn(again->id(), home.string(), {}, {}, err);
+        CHECK(pool.node(child)->root() == "talk", "派生出来的属于同一段对话");
+        CHECK(pool.node(child)->session_dir() == sessions_dir(home.string()) + "/sub",
+              "子 agent 落在对话那一头的 sub/，不进对话清单");
+    }
+
+    printf("== 组：跨组一律当不存在（ADR-0021） ==\n");
+    {
+        Agents pool(ctx_of, approval);
+        std::string err;
+        const auto a = pool.open("win-1", home.string(), "g1", err);
+        const auto b = pool.open("win-2", home.string(), "g2", err);
+
+        CHECK(pool.find("win-1", a->session_id()) && !pool.find("win-2", a->session_id()),
+              "别的组找不到——不区分「不存在」与「不是你的」");
+
+        const int last = pool.spawn(a->id(), home.string(), {}, {}, err);
+        pool.close_group("win-1");
+        CHECK(!pool.find("win-1", a->session_id()) && !pool.node(last), "关组连派生的一起关");
+        CHECK(pool.find("win-2", b->session_id()) != nullptr, "隔壁组的不受牵连");
+        CHECK(top(pool, "win-1") > last, "id 不复用：模型历史里的旧 id 不会指到新 agent 上");
+    }
+
+    printf("== 发信人：收方认识发方才署名（ADR-0019 §5） ==\n");
+    {
+        Agents pool(ctx_of, approval);
+        std::string err;
+        const int a = top(pool, "");
+        const int b = pool.spawn(a, home.string(), {a}, {a}, err); // a ⇄ b
+        const int c = pool.spawn(a, home.string(), {a}, {}, err);  // a → c
+        const auto pb = pool.node(b), pc = pool.node(c);
+
+        pool.send(a, b, "TAGGED");
+        pool.send(a, c, "PLAIN");
+        CHECK(wait_messages(*pb, 1) && history(*pb)[0]["content"][0]["text"] == "[from " + std::to_string(a) + "] TAGGED",
+              "b 有到 a 的边：带上是谁发的");
+        CHECK(wait_messages(*pc, 1) && history(*pc)[0]["content"][0]["text"] == "PLAIN",
+              "c 没有到 a 的边：跟人发的一模一样");
     }
 
     printf("== 完成通知沿入边逆向回流 ==\n");
     {
-        Agents pool(ctx, approval);
+        Agents pool(ctx_of, approval);
         std::string err;
-        const int a = pool.create(home.string(), 0, {}, {}, err);
-        const int b = pool.create(home.string(), a, {a}, {}, err); // a → b
-        Agent *pa = pool.find(a);
+        const int a = top(pool, "");
+        const int b = pool.spawn(a, home.string(), {a}, {}, err); // a → b
+        const auto pa = pool.node(a);
         const auto snapshot = [pa] { return history(*pa); };
         const size_t before = snapshot().size();
 
-        pool.post(b, "去干活"); // b 跑完会沿入边通知 a
+        pool.send(a, b, "去干活"); // b 跑完会沿入边通知 a
         nlohmann::json m;
         for (int i = 0; i < 400; ++i)
         {
@@ -195,30 +275,47 @@ int main()
               "role 是 user——凡是从 agent 外面来的输入都是 user");
     }
 
-    printf("== close：关闭 agent ==\n");
+    printf("== 只由完成通知唤醒的那一趟不再通知：环上不回声 ==\n");
     {
-        Agents pool(ctx, approval);
+        Agents pool(ctx_of, approval);
         std::string err;
-        const int a = pool.create(home.string(), 0, {}, {}, err);
-        const int b = pool.create(home.string(), a, {a}, {}, err);
-        pool.close(b);
-        CHECK(pool.find(b) == nullptr && pool.list().size() == 1, "b 没了，清单里也没有它了");
+        const int a = top(pool, "");
+        const int b = pool.spawn(a, home.string(), {a}, {a}, err); // a ⇄ b
+        const auto pa = pool.node(a), pb = pool.node(b);
+
+        pool.send(a, b, "去干活"); // b 收工 → 通知 a；a 那一趟只有通知 → 不再通知 b
+        CHECK(wait_messages(*pa, 1), "a 收到了 b 的完成通知");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(history(*pb).size() == 1, "b 只有那一条活，没有被 a 的回声再叫醒");
     }
 
-    printf("== 会话落点由「谁创建的」决定，不是一个参数（ADR-0021） ==\n");
+    printf("== 帧带上是哪段对话的（ADR-0029） ==\n");
     {
-        const fs::path wd = home / "wd";
-        fs::create_directories(wd);
-        Agents pool(ctx, approval);
+        std::vector<std::string> frames;
+        std::mutex fm;
+        const ContextOf record = [&](const std::string &) {
+            CoreContext c = ctx;
+            c.emit_fn = [&](const std::string &, const std::string &payload) {
+                std::lock_guard<std::mutex> lk(fm);
+                frames.push_back(payload);
+            };
+            return c;
+        };
+        Agents pool(record, approval);
         std::string err;
-        const int top = pool.create(wd.string(), 0, {}, {}, err);
-        const int sub = pool.create(wd.string(), top, {top}, {}, err);
-
-        const std::string dtop = pool.find(top)->session_dir();
-        const std::string dsub = pool.find(sub)->session_dir();
-        CHECK(dtop == (wd / ".realagent" / "sessions").string(), "客户端建的落 sessions/");
-        CHECK(dsub == (wd / ".realagent" / "sessions" / "sub").string(), "派生的落 sessions/sub/");
-        CHECK(dtop != dsub, "两个落点不同——清单只扫顶层，于是 sub 的不进列表");
+        const auto a = pool.open("", home.string(), "stamped", err);
+        const int b = pool.spawn(a->id(), home.string(), {}, {}, err, {}, "干活");
+        CHECK(wait_messages(*pool.node(b), 1), "子 agent 收到了");
+        std::lock_guard<std::mutex> lk(fm);
+        bool all = !frames.empty(), child = false;
+        for (const std::string &f : frames)
+        {
+            const nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
+            all = all && j.is_object() && j.value("root", "") == a->session_id() && j.contains("session_id");
+            child = child || j.value("session_id", "") == pool.node(b)->session_id();
+        }
+        CHECK(all, "每帧都是合法 JSON，root 都是那段对话");
+        CHECK(child, "子 agent 的帧也在，session_id 是它自己的");
     }
 
     printf("== spawn 的 agent 参数：认得的接上正文，认不得当场失败（ADR-0024 §8） ==\n");
@@ -232,9 +329,8 @@ int main()
         const std::vector<AgentDef> defs = scan_agent_defs(home.string());
         CHECK(defs.size() == 1 && defs[0].name == "builder", "扫到一份，名字取文件名");
 
-        Agents pool(ctx, approval);
-        std::string err;
-        const int me = pool.create(home.string(), 0, {}, {}, err);
+        Agents pool(ctx_of, approval);
+        const int me = top(pool, "");
         Executor exe(ctx, approval, home.string(), &pool, me, nullptr, nullptr, &defs);
         const auto spawn = [&](const std::string &agent) {
             nlohmann::json p{{"workdir", home.string()}, {"prompt", "干活"}};
@@ -245,13 +341,14 @@ int main()
         const nlohmann::json bad = spawn("nope");
         CHECK(bad.value("isError", false), "认不出的名字：当场失败");
         CHECK(text_of(bad).find("nope") != std::string::npos, "错误里点名是哪个名字");
-        CHECK(pool.list().size() == 1, "失败就没有新 agent——不悄悄派生一个没接上正文的");
 
         const nlohmann::json ok = spawn("builder");
         CHECK(!ok.value("isError", true), "认得的名字：派生成功");
         const int id = std::atoi(text_of(ok).c_str());
-        const Agent *nb = id > 0 ? pool.find(id) : nullptr;
+        const auto nb = id > 0 ? pool.node(id) : nullptr;
         CHECK(nb != nullptr, "新 agent 在图上");
+        CHECK(nb && text_of(ok).find("(session " + nb->session_id() + ")") != std::string::npos,
+              "结果里带它的 session_id：客户端回放时凭它把子 agent 嵌回这张卡片");
         const std::string sp = nb ? nb->system_prompt() : std::string();
         CHECK(sp.find("BODY_MARK") != std::string::npos, "那份正文接进了它的 system prompt");
         CHECK(sp.find("autonomous loop") != std::string::npos &&
@@ -261,7 +358,7 @@ int main()
         // 不给 agent 参数：与加这个功能之前一个字不差
         const nlohmann::json plain = spawn("");
         const int id2 = std::atoi(text_of(plain).c_str());
-        const Agent *nb2 = id2 > 0 ? pool.find(id2) : nullptr;
+        const auto nb2 = id2 > 0 ? pool.node(id2) : nullptr;
         CHECK(nb2 && nb2->system_prompt().find("BODY_MARK") == std::string::npos,
               "不给 agent 参数就一个字都不接");
     }

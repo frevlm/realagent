@@ -186,9 +186,11 @@ _Avoid_: `扩展`、`extension`、`容器`（[[ADR-0016]] 里那个词指的是�
 
 派发因此多**一个**分支，判的是「这条是 core 的一个动作，还是一段要发出去的文字」——一个真区别，同 `Executor::execute` 为 MCP 多的那一个。
 
-**内置的不可被覆盖**，理由同内置六个 [[Tool]]：覆盖掉 `/new` 就没法开新会话。装来的 plugin 带前缀（`/caveman:caveman-commit`）天然不撞，只有隐式 plugin 撞得上，那一条跳过并报出来。
+**内置的不可被覆盖**，理由同内置六个 [[Tool]]：覆盖掉 `/model` 就没法换模型。装来的 plugin 带前缀（`/caveman:caveman-commit`）天然不撞，只有隐式 plugin 撞得上，那一条跳过并报出来。
 
-prompt 命令表跟着 [[Agent（代理）]]的[[工作目录（Workdir）]]走，于是 `GET /commands` **可以带一个 `agent_id`**；不带就只回内置那三条——不是降级，是那个问题在没有 agent 时没有答案（同 [[ADR-0022]] 砍掉项目级 settings 的判据）。
+prompt 命令表跟着[[工作目录（Workdir）]]走，于是 `GET /commands` 带 `workdir`；不需要先有一个 agent。
+
+`/new` 与 `/resume` 不是 core 的命令：换一段[[对话（Conversation）]]只是下一条消息带哪个 `session_id`，由客户端就地处理（[[ADR-0029]]）。名字照旧占着，plugin 的命令不许撞上。
 
 从 md 里只取三样：`description`、`argument-hint`、正文。`allowed-tools` / `model` 不收——权限与模型档位不该由一段 markdown 决定。参数只认 `$ARGUMENTS`，它进的是 prompt 不是 shell，与用户自己打那段字没有区别。
 
@@ -330,7 +332,9 @@ _Avoid_: `package`、`library`（指 core 内部模块时）
 
 **「不在会话列表里显示」不是一个开关，是落点的后果**：会话清单是扫会话目录扫出来的（`Session::list()`），而 TUI 创建的 agent 落 `sessions/`、`spawn` 出来的落 `sessions/sub/`，清单只扫顶层（[[ADR-0021]]）。给对话取名那种杂活 agent 落在 `sub/` 里——**它有记录，只是不进列表**。两边都落盘是刻意的：不落盘的那份内存里丢不掉，而且出了事查不了。
 
-**core 不为任何 agent 过滤 [[Event]]**：全推，每帧带 `agent_id`，客户端认识哪个渲染哪个。因此杂活 agent 失败时用户看得见——这不需要为它设计任何东西，只需要不设计过滤。
+**客户端不认识 agent**（[[ADR-0029]]）。它看见的是[[对话（Conversation）]]：agent 发出的每帧 [[Event]] 盖着 `root`（属于哪段对话）与 `session_id`（谁说的），不带 agent id。agent id 只在图里用——模型拿它 `spawn`、`send_message`，人用不着。
+
+**agent 在一段对话的第一条消息到达时才建出来**，所以没有从没说过话的 agent。
 
 **三个状态**：
 
@@ -350,8 +354,6 @@ Agent 不是客户端的东西——**没人盯着也照跑**。但它有所有�
 
 _立刻丢，不设「idle N 秒后丢」的定时器_：那是又一个可调参数、又一个中间状态、又一个刚丢完就来消息的抖动。
 
-TUI 只是选一个连上去看。
-
 _Avoid_: `会话`（[[Session]] 是盘上的记录，Agent 是内存里正在跑的东西，一个 Session 可以先后被两个 Agent 打开）、`任务`、`worker`
 
 ### **组（Group）**:
@@ -360,9 +362,9 @@ _Avoid_: `会话`（[[Session]] 是盘上的记录，Agent 是内存里正在跑
 
 `spawn` 出来的 agent 属于创建者所在的组。这不是「继承」这种需要判断的东西：组就是所有权边界，一个 agent 不可能属于别的组。**[[边（Edge）]]不跨组**（自动成立——`spawn` 的 `peers` 只能填创建者认识的，而它只认识同组的）。
 
-**隔离是硬的**：跨组的 agent id 一律当「无此 agent」，不区分「不存在」与「不是你的」——区分了就等于告诉调用方别的组里有什么。
+**隔离是硬的**：跨组的对话一律当不存在，不区分「不存在」与「不是你的」——区分了就等于告诉调用方别的组里有什么。推送帧与审批只发给那一组的连接。同一段对话同一时刻只能在一个组里开着。
 
-**生命周期**：客户端主动建（第一次 `POST /agent`），退出前显式关，**连接断开满 60 秒即关**（QUIC 原生 `max_idle_timeout` 探连接死活，应用层只记一个 60 秒的表）。关组的顺序是先 `interrupt` 再逐个 close——直接 close 一个在跑的 agent，它的线程会往一个已拆掉的[[收件箱（Inbox）]]里写。
+**生命周期**：客户端第一次开对话时建，退出前显式关，**最后一条 `/events` 连接断开满 60 秒即关**（main 里一条 reaper 线程每 5 秒看一次）。关组的顺序是先 `interrupt` 再逐个 close——直接 close 一个在跑的 agent，它的线程会往一个已拆掉的[[收件箱（Inbox）]]里写。
 
 于是**core 里不存在没有所有者的 agent**。代价是「关掉终端让 agent 跑一夜」这个用法明确不做（[[ADR-0021]]）。
 
@@ -390,6 +392,13 @@ Agent 主循环不是"被喂一句用户输入"，是**一圈一个 [[Turn]]**�
 
 「跑完通知」那一路仍然是一个 hook（跑完时触发的行为），但**它没有自己的注册表**：订阅者集合由[[边（Edge）]]推导——跑完就扫自己的入边、逐个投递。建边即注册，没有「注册 hook」这个动作，也就没有第二份数据可漂。
 
+**两种收工不通知**（2026-10-08，真模型实测撞出来的）：
+
+- **这一趟取到的全是完成通知**。完成通知是消息不是请求，读完它收工只是回声。不断的话，有环的图（teamwork 形态就是环）会自己无限互相唤醒——实测 7 分钟空转 264 趟，没有一个模型做过决定。收件箱里每条消息因此带一个「是不是完成通知」的标记。
+- **这一趟被中断了**。没跑完；而且用户正要停下整段对话，这条通知会把刚停下的父 agent 又叫醒。
+
+代价：中间层 agent（P 派 C，C 又派 D）如果是在 D 的完成通知唤醒的那一趟里才干完，P 收不到 C 的完成通知。C 要回报，就得 P 在它的出边里、用 `send_message`。
+
 > 实况注（2026-08-28）：已全部落地。收件箱与线程内化进 `Agent`（`deque` + `mutex` + `condition_variable` + 一条 `std::thread`）；`main` 里那个「每条消息起一条 detach 线程 + 一把全局 `agent_mtx`」的写法已删除，锁归 Agent 自己（`Agent::try_lock`）。图在 `Agents`（`core/src/agent/agents.cpp`）：`unordered_map<id, unordered_set<id>>` 一张出边表，反向查扫全表。`spawn` / `send_message` 实现在 `Executor` 而不是 `tools.cpp`——它们要认识 `Agents`，而 `tools/` 在 `agent/` 下面，反过来包含就是层级倒挂；两个工具的**定义**仍在同一张静态表里，LLM 看见的清单只有一份。
 >
 > 落地时撞出两个**必然**（不是竞态）的错误，都是「持着一把锁去 join 一条需要这把锁的线程」：`~Agents` 销毁 map 时 join 到的线程正要拿图锁投完成通知（use-after-free）；`close()` 持锁 `erase` 触发 join 同理（死锁）。修法一样：先在锁里把对象从表里摘出来，放开锁，再让它析构。判据是**窗口由某个「等待」撑开就必然发生**——`join` 等的就是那条线程。
@@ -410,7 +419,17 @@ _Avoid_: `cwd`、`当前目录`、`项目目录`（"项目"是人的说法，cor
 
 一段连续的对话记录，含消息历史、状态、元数据。以 **JSONL 文件**持久化（一行一条消息/事件），目录结构支持会话树（分支/fork）。人可读、可 diff、可进 git。
 
-_Avoid_: `conversation`（除非与 Session 区分出明确差异）
+_Avoid_: `conversation`（除非与 Session 区分出明确差异——见[[对话（Conversation）]]）
+
+### **对话（Conversation）**:
+
+用户看见的那个东西：一个顶层 [[Session]]，加上它派生出去的子 agent 的那些（落在 `sessions/sub/`）。**协议里唯一的名词**（[[ADR-0029]]）——客户端用顶层 Session 的 `session_id` 指它，发消息、中断、回放都按它；agent、边、agent id 是 core 与模型之间的事。
+
+每个 agent 带一个 `root` 标签：它属于哪段对话。客户端开的，`root` 是自己的 `session_id`；`spawn` 出来的，继承创建者的。**`root` 只管显示与中断**——子 agent 嵌在父对话里画、Esc 停下整段对话——**投递只看[[边（Edge）]]**。
+
+与 [[Session]] 的差别：Session 是盘上一个 JSONL 文件，一段对话可以有好几个（父的一个、每个子 agent 一个）。
+
+_Avoid_: `agent`（对用户说的时候）、`线程`
 
 > 实况注（2026-08-16 / 2026-08-28）：已落地（`core/src/agent/session.cpp`），落点 `<workdir>/.realagent/sessions/<id>.jsonl`。**已改成按 [[工作目录（Workdir）]] 取**：`Session` 的构造函数与 `Session::list()` 都收一个目录参数，`Config::session_dir()` 已删除——core 进程没有"当前目录"这个概念。id 形如 `20260816-153739-31d3`——时间戳 + 4 位随机，字典序即时间序，所以清单不需要索引文件。
 > **一行 = 抽象对话里的那一条消息，原样**（`{"role":..., "content":[...]}`），没有外层信封。早先设计的"type 分 user/assistant/tool_call/tool_result + id/ts/model 信封"没有采用：那是抽象对话形状定下来之前的设计，不同形就得写一对转换函数，而转换函数正是丢字段的地方（thinking 的 signature、一条 assistant 消息里的多个 tool_use）。call_id 关联本来就在块里。
@@ -517,7 +536,8 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 一个**组**拥有一批 **Agent**，组的单位就是客户端；跨组的 agent id 一律当「无此 agent」
 - `A → B` 这条**边**同时是三样东西：A 知道 B 存在、A 能给 B 发消息、B 跑完时通知 A（完成通知**逆边**回流——边指向你关心的那个 agent）
 - **hook** 的订阅者名单由**边**推导，不单独存；「注册 hook」= 建一条边
-- 一个 **Session** 可以先后被两个 **Agent** 打开（close 之后再 `POST /agent {session_id}`）；反过来一个 Agent 恰好一个 Session
+- 一个 **Session** 可以先后被两个 **Agent** 打开（close 之后再往这段对话发消息，core 从盘上把它打开）；同一时刻最多一个；反过来一个 Agent 恰好一个 Session
+- 一段**对话**是一个顶层 **Session** 加上它派生出去的那些；客户端用 `session_id` 指它，从不用 agent id
 - 一个**客户端**拥有一个**组**，一个**组**拥有若干 **Agent**；**边**只在组内；跨组不可见、不可达
 - 一个 **Agent** 看得见的 **Skill** 由它的**工作目录**决定：全局一份、workdir 一份，同名近的赢；skill 正文用 **read** 读，没有专用工具
 - **read** 印出行号与**行 hash**，**edit** 用这两个值指位置；改一行不影响别行的 hash

@@ -19,12 +19,11 @@ func modelsJSON() json.RawMessage {
 	return data
 }
 
-func sessionsJSON() json.RawMessage {
-	data, _ := json.Marshal([]client.SessionInfo{
-		{ID: "s-002", Title: "改一个 bug", Messages: 12, OpenedBy: 1},
+func sessionsList() []client.SessionInfo {
+	return []client.SessionInfo{
+		{ID: "s-002", Title: "改一个 bug", Messages: 12, State: "running"},
 		{ID: "s-001", Title: "读代码", Messages: 4},
-	})
-	return data
+	}
 }
 
 func TestPanelWantOf(t *testing.T) {
@@ -36,8 +35,6 @@ func TestPanelWantOf(t *testing.T) {
 		{"/model", false, "model"},
 		{"/model deepseek-chat", false, ""}, // 带名 = 明确指令，选完即走
 		{"/model deepseek-chat", true, ""},  // 面板里选中模型同样收工
-		{"/resume", false, "resume"},
-		{"/resume s-001", false, ""}, // 带 id = 明确指令，恢复完即走
 		{"/statusline", false, "statusline"},
 		{"/statusline icons nerd", false, ""},
 		{"/statusline icons nerd", true, "statusline"},
@@ -88,7 +85,7 @@ func TestModelPanel(t *testing.T) {
 
 // 会话面板：高亮落在当前会话上，确认项发的是完整命令
 func TestSessionPanel(t *testing.T) {
-	p := sessionPanel(sessionsJSON(), 1)
+	p := sessionPanel(sessionsList(), "s-002")
 	if p == nil {
 		t.Fatal("sessionPanel 返回 nil")
 	}
@@ -98,21 +95,24 @@ func TestSessionPanel(t *testing.T) {
 	if got := p.items[1].submit; got != "/resume s-001" {
 		t.Errorf("submit = %q", got)
 	}
-	if !strings.Contains(p.items[0].label, "改一个 bug") {
-		t.Errorf("label 少了会话标题: %q", p.items[0].label)
+	if !strings.Contains(p.items[0].label, "改一个 bug") || !strings.Contains(p.items[0].label, "正在跑") {
+		t.Errorf("label 少了标题或状态: %q", p.items[0].label)
 	}
 }
 
 // 无数据造不出面板：退回文本输出，不是新的失败点
 func TestMakePanelEmpty(t *testing.T) {
-	if p := makePanel("model", json.RawMessage(`[]`), 1); p != nil {
+	if p := makePanel("model", json.RawMessage(`[]`)); p != nil {
 		t.Error("空清单不该开面板")
 	}
-	if p := makePanel("resume", json.RawMessage(`{`), 1); p != nil {
+	if p := makePanel("model", json.RawMessage(`{`)); p != nil {
 		t.Error("坏载荷不该开面板")
 	}
-	if p := makePanel("new", nil, 1); p != nil {
+	if p := makePanel("plugins", nil); p != nil {
 		t.Error("无面板的命令不该开面板")
+	}
+	if p := sessionPanel(nil, ""); p != nil {
+		t.Error("没有对话不该开面板")
 	}
 }
 
@@ -163,20 +163,20 @@ func TestPanelNav(t *testing.T) {
 // Enter 确认 = 把 submit 当成用户输入发出去（复用 submitInput，没有第二条路）
 func TestPanelEnterSubmits(t *testing.T) {
 	m := testModel()
-	m.panel = sessionPanel(sessionsJSON(), 1)
+	m.panel = sessionPanel(sessionsList(), "")
 	m.panel.sel = 1 // s-001
 	m, cmd := m.panelKey("enter")
 	if m.panel != nil {
-		t.Error("确认后面板应先关闭，等结果回来再开")
+		t.Error("确认后面板应关闭")
 	}
 	if cmd == nil {
-		t.Error("确认应发出请求")
+		t.Error("确认应去拉那段对话的历史")
 	}
-	if got := lineTexts(m); len(got) == 0 || got[len(got)-1] != "/resume s-001" {
-		t.Errorf("提交的输入 = %v", got)
+	if m.client.SessionID() != "s-001" {
+		t.Errorf("当前对话 = %q, want s-001", m.client.SessionID())
 	}
 	if m.panelWant != "" {
-		t.Errorf("panelWant = %q, want 空（恢复完即走）", m.panelWant)
+		t.Errorf("panelWant = %q, want 空（换完即走）", m.panelWant)
 	}
 }
 

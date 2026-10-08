@@ -59,9 +59,9 @@ bool Executor::check_permission(const nlohmann::json &tool, const std::string &p
             return deny("denied by permission policy");
         case Verdict::Ask:
             // 没有客户端就没人能裁决：当场拒，不空等 30 秒超时
-            if (!approval_.online()) return deny("无客户端可裁决");
-            if (approval_.await(agent_id_, tool.value("name", std::string()), params_json) !=
-                Verdict::Allow)
+            if (ctx_.online && !ctx_.online()) return deny("无客户端可裁决");
+            if (approval_.await(agent_id_, tool.value("name", std::string()), params_json,
+                                ctx_.emit_fn) != Verdict::Allow)
                 return deny("denied by user");
             return true;
     }
@@ -135,7 +135,8 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
         const auto to = params.find("to");
         if (to == params.end() || !to->is_number_integer())
             return tool_fail("send_message is missing or has an invalid target agent id: to");
-        if (!pool_->post(to->get<int>(), str("text")))
+        // 没有边就跟不存在一样：不告诉它「有，但你够不着」
+        if (!pool_->send(agent_id_, to->get<int>(), str("text")))
             return tool_fail("no such agent: " + std::to_string(to->get<int>()));
         return tool_ok("sent to " + std::to_string(to->get<int>()));
     }
@@ -153,11 +154,12 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
     }
 
     std::string err;
-    const int id = pool_->create(str("workdir"), agent_id_, id_list(params, "in_edges"),
-                                 id_list(params, "out_edges"), err, def_body);
+    const int id = pool_->spawn(agent_id_, str("workdir"), id_list(params, "in_edges"),
+                                id_list(params, "out_edges"), err, def_body, str("prompt"));
     if (id <= 0) return tool_fail(err);
-    pool_->post(id, str("prompt"));
-    return tool_ok(std::to_string(id));
+    // 会话 id 是给客户端的：回放时它凭这个把子 agent 的过程嵌回这张工具卡片下面
+    const auto child = pool_->node(id); // 关组可能抢在这一句前面
+    return tool_ok(std::to_string(id) + (child ? " (session " + child->session_id() + ")" : ""));
 }
 
 } // namespace realagent

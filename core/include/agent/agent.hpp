@@ -48,18 +48,22 @@ struct LlmOutcome {
 
 class Agent {
   public:
-    /* workdir 必传，工具的相对路径与会话目录都从它算起。
-     * sub = 由别的 agent 派生，会话落在 sessions/sub/，不进会话清单。
-     * def_body = agent 定义正文，接在 system prompt 末尾。 */
-    Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
-          Agents *pool = nullptr, bool sub = false, std::string def_body = {});
+    /* ctx 拷一份留着：事件出口与「有没有人能裁决」是这个 agent 那一组的。
+     * workdir 必传，工具的相对路径从它算起。
+     * session_dir 为空就落 sessions_dir(workdir)；派生的由 Agents 指到对话那一头的 sub/。
+     * root = 用户看见的那段对话的 session_id，为空就是自己（ADR-0029）。
+     * def_body = agent 定义正文，接在 system prompt 末尾。
+     * session_id 为空就开一个新会话；盘上有就接着它往下说。 */
+    Agent(CoreContext ctx, ApprovalCoordinator &approval, std::string workdir, int id,
+          Agents *pool = nullptr, std::string session_dir = {}, std::string root = {},
+          std::string def_body = {}, std::string session_id = {});
     ~Agent();
 
     int id() const { return id_; }
     const std::string &workdir() const { return workdir_; }
     const std::string &session_dir() const { return session_dir_; }
     const std::string &session_id() const { return session_.id(); }
-    const std::vector<PromptCommand> &commands() const { return commands_; }
+    const std::string &root() const { return root_; }
 
     /* 建 agent 时 MCP 连不上、hooks.json 读坏的那些，给 /plugins 看。 */
     std::vector<std::string> plugin_errors() const;
@@ -72,24 +76,16 @@ class Agent {
     void session_start_hook(const std::string &source);
 
     /* 投一条消息进收件箱（人、别的 agent、完成通知都走这里）。正在跑也照投，
-     * 下一个 turn 开头取走。 */
-    void post(std::string message);
+     * 下一个 turn 开头取走。notice = 这是一条完成通知。 */
+    void post(std::string message, bool notice = false);
 
     bool running() const { return running_.load(); }
-
-    /* 事件循环线程动历史（/new、/resume、列会话）前先拿这把锁；拿不到就回"忙"，不等。 */
-    std::unique_lock<std::mutex> try_lock() { return {run_mtx_, std::try_to_lock}; }
 
     /* 任意线程。停住 LLM 流与在跑的工具。 */
     void interrupt();
 
     /* 内存里留着几条历史；idle 时是 0。 */
     size_t resident() const { return messages_.size(); }
-
-    /* /new：清空历史、换一个会话文件（旧的留在盘上）。 */
-    void reset();
-    /* /resume：读回那个会话。读不到返回 false，当前会话不动。 */
-    bool resume(const std::string &id);
 
     /* SseParser 产出的事件落到这里（public 只因 curl 回调是自由函数）。
      * silent：正文不推给客户端（收工判定那次），花费照报。 */
@@ -117,7 +113,7 @@ class Agent {
     std::string last_text() const;
     void broadcast(const std::string &type, const nlohmann::json &payload);
 
-    CoreContext &ctx_;
+    CoreContext ctx_;        // 排第一：exe_ 拿的是它的引用
     Agents *pool_ = nullptr; // 测试里独立构造时为空
     int id_ = 0;
     std::string workdir_;
@@ -128,12 +124,12 @@ class Agent {
     std::vector<AgentDef> agent_defs_;
     Executor exe_;
     std::vector<Skill> skills_;
-    std::vector<PromptCommand> commands_;
 
     std::string session_dir_;
     Session session_;
+    std::string root_;
     nlohmann::json messages_ = nlohmann::json::array(); // idle 时清空，醒来从盘上读回
-    bool loaded_ = true;
+    bool loaded_;
     std::string session_context_; // SessionStart hook 注入的文字
     std::string def_body_;
 
@@ -145,7 +141,12 @@ class Agent {
 
     std::mutex mtx_; // 护 inbox_ / closing_
     std::condition_variable cv_;
-    std::deque<std::string> inbox_;
+    struct Mail {
+        std::string text;
+        bool notice; // 完成通知：只是消息，不是请求
+    };
+    std::deque<Mail> inbox_;
+    bool asked_ = false; // 这一趟收到过不是完成通知的东西
     bool closing_ = false;
     std::atomic<bool> running_{false};
     std::mutex run_mtx_; // 一趟期间持有

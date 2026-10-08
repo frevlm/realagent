@@ -2,7 +2,8 @@
 //
 // POST /message 提交消息，回复与审批都走 /events 推送流。屏幕：历史进 viewport（可滚），
 // 底下是审批框 + 子面板 + 斜杠菜单 + 读秒行 + 输入框 + 状态栏。
-// 只留当前 agent 的行流；切 agent 就丢掉、从 GET /session 重新读。
+// 用户看见的只有对话，没有 agent（ADR-0029）：只留当前那段对话的行流，换一段就丢掉、
+// 从 GET /session 重新读；它派生出去的子 agent 缩进成一行一条，挂在这段对话里。
 package main
 
 import (
@@ -49,10 +50,10 @@ func waitEventCmd(ch <-chan client.Event) tea.Cmd {
 	}
 }
 
-// 拉取斜杠命令列表（失败就没有菜单）。plugin 命令跟着 agent 的工作目录走。
-func fetchCommandsCmd(c *client.Client, agentID int) tea.Cmd {
+// 拉取斜杠命令列表（失败就没有菜单）。plugin 命令跟着工作目录走。
+func fetchCommandsCmd(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
-		cmds, err := c.FetchCommands(agentID)
+		cmds, err := c.FetchCommands()
 		return commandsMsg{cmds: cmds, err: err}
 	}
 }
@@ -64,6 +65,7 @@ type pendingApproval struct {
 	id     string // permission_request / approval-response 关联 ID
 	tool   string
 	params string // 工具参数（紧凑 JSON，仅展示）
+	from   string // 不是当前对话本身在问时说明是谁：子任务 / 另一段对话
 }
 
 // 斜杠菜单最多同时显示的条目数（超出按高亮项开窗）
@@ -113,29 +115,29 @@ func sendCmd(c *client.Client, input string) tea.Cmd {
 
 // historyMsg 携带 GET /session 的回放帧
 type historyMsg struct {
-	agentID int
-	frames  []client.Frame
-	err     error
+	sessionID string
+	frames    []client.Frame
+	err       error
 }
 
-// fetchHistoryCmd 拉一个 agent 的历史，带回 agentID：回来时用户可能已经切走了
-func fetchHistoryCmd(c *client.Client, agentID int) tea.Cmd {
+// fetchHistoryCmd 拉一段对话的历史，带回 sessionID：回来时用户可能已经换走了
+func fetchHistoryCmd(c *client.Client, sessionID string) tea.Cmd {
 	return func() tea.Msg {
-		f, err := c.FetchSession(agentID)
-		return historyMsg{agentID: agentID, frames: f, err: err}
+		f, err := c.FetchSession(sessionID)
+		return historyMsg{sessionID: sessionID, frames: f, err: err}
 	}
 }
 
-// agentsMsg 携带 GET /agents 的清单
-type agentsMsg struct {
-	list []client.AgentInfo
+// sessionsMsg 携带 GET /sessions 的对话清单
+type sessionsMsg struct {
+	list []client.SessionInfo
 	err  error
 }
 
-func fetchAgentsCmd(c *client.Client) tea.Cmd {
+func fetchSessionsCmd(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
-		l, err := c.FetchAgents()
-		return agentsMsg{list: l, err: err}
+		l, err := c.FetchSessions()
+		return sessionsMsg{list: l, err: err}
 	}
 }
 
@@ -164,8 +166,8 @@ func approvalCmd(c *client.Client, id string, allow bool) tea.Cmd {
 // ==================== Bubble Tea 接口 ====================
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client, m.client.AgentID()), fetchStatusCmd(m.client),
-		fetchHistoryCmd(m.client, m.client.AgentID()))
+	// 起步是一段新对话：还没说过话，没有历史可读
+	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client), fetchStatusCmd(m.client))
 }
 
 // Update 先跑业务，再把行流铺进 viewport。别处只管往 m.lines 追加。
@@ -260,9 +262,9 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		case v.reply.Ok:
 			m.awaiting = false
 			m.busy.stop() // 命令不启动 agent turn，收到结果即收工
-			// 无参的 /model /resume 是要选一个：做成子面板，造不出才退回文本
+			// 无参的 /model 是要选一个：做成子面板，造不出才退回文本
 			if m.panelWant == v.reply.Command {
-				if p := makePanel(v.reply.Command, v.reply.Data, m.client.AgentID()); p != nil {
+				if p := makePanel(v.reply.Command, v.reply.Data); p != nil {
 					m.panel = p
 					return m, nil
 				}
@@ -271,8 +273,6 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			switch v.reply.Command {
 			case "model":
 				text = renderModels(v.reply.Data)
-			case "new", "resume":
-				text = renderSessions(v.reply.Command, v.reply.Data, m.client.AgentID())
 			case "plugins":
 				text = renderPlugins(v.reply.Data)
 			}
@@ -281,8 +281,8 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		return m, nil
 
 	case historyMsg:
-		// 用户已经切走了：丢掉
-		if v.agentID != m.client.AgentID() {
+		// 用户已经换走了：丢掉
+		if v.sessionID != m.client.SessionID() {
 			return m, nil
 		}
 		if v.err != nil {
@@ -297,12 +297,14 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		m.busy.stop() // 别让历史里的 turn_start 点着读秒行
 		return m, nil
 
-	case agentsMsg:
+	case sessionsMsg:
 		if v.err != nil {
-			m.emit("error", "取 agent 清单失败: "+v.err.Error())
+			m.emit("error", "取对话清单失败: "+v.err.Error())
 			return m, nil
 		}
-		m.panel = agentPanel(v.list, m.client.AgentID())
+		if m.panel = sessionPanel(v.list, m.client.SessionID()); m.panel == nil {
+			m.emit("info", "📄 这个目录下还没有对话")
+		}
 		return m, nil
 
 	case interruptMsg:
@@ -433,7 +435,8 @@ func (m model) menuOpen() bool {
 // localCmds 是不经 core 的斜杠命令：合进菜单，在 submitInput 里就地处理。
 var localCmds = []client.Command{
 	statuslineCmd, // statusline.go
-	{Name: "agents", Description: "切到本组的另一个 agent（无参 = 列出来选）"},
+	{Name: "new", Description: "开一段新对话（当前这段留在盘上）"},
+	{Name: "resume", Description: "换到另一段对话（无参 = 列出来选）"},
 	{Name: "quit", Description: "退出 TUI（core 继续在后台跑）"},
 }
 
@@ -523,7 +526,7 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 		m.emit("user", input)
 	}
 
-	// 以下三条是纯客户端命令
+	// 以下几条是纯客户端命令
 	if cmd, _ := splitCommand(input); cmd == "/quit" {
 		return m, tea.Quit
 	}
@@ -542,14 +545,18 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 		return m, nil
 	}
 
-	// /agents：无参 = 开面板选，带 id = 直接切
-	if cmd, rest := splitCommand(input); cmd == "/agents" {
+	// 换对话不需要 core 做任何事：下一条消息带哪个 session_id 而已
+	if cmd, _ := splitCommand(input); cmd == "/new" {
+		m.client.Fresh()
+		m.reset()
+		m.emit("info", "✨ 新对话")
+		return m, nil
+	}
+	if cmd, rest := splitCommand(input); cmd == "/resume" {
 		if rest == "" {
-			return m, fetchAgentsCmd(m.client)
+			return m, fetchSessionsCmd(m.client)
 		}
-		var id int
-		_, _ = fmt.Sscanf(rest, "%d", &id)
-		return m.attach(id)
+		return m.switchTo(rest)
 	}
 
 	m.awaiting = true
@@ -557,18 +564,23 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	return m, tea.Batch(sendCmd(m.client, input), m.busy.begin("发送中", time.Now()))
 }
 
-// attach 切到另一个 agent：丢掉当前行流，从 GET /session 重读。
-func (m model) attach(id int) (model, tea.Cmd) {
-	if id == m.client.AgentID() {
+// switchTo 换一段对话：丢掉当前行流，从 GET /session 重读。
+// 原来那段在 core 里照跑，回来时从盘上读得到。
+func (m model) switchTo(sessionID string) (model, tea.Cmd) {
+	if sessionID == m.client.SessionID() {
 		return m, nil
 	}
-	m.client.Attach(id)
+	m.client.Use(sessionID)
+	m.reset()
+	return m, fetchHistoryCmd(m.client, sessionID)
+}
+
+// reset 丢掉当前对话的行流与读秒
+func (m *model) reset() {
 	m.lines = nil
 	m.open = false
 	m.busy.stop()
 	m.awaiting = false
-	m.emit("info", fmt.Sprintf("⇄ 切到 agent %d", id))
-	return m, fetchHistoryCmd(m.client, id)
 }
 
 // decideApproval 处理审批裁决：记录结果 → 退出审批模态 → 回传 core
@@ -590,13 +602,20 @@ func (m model) decideApproval(allow bool) (model, tea.Cmd) {
 
 // handleEvent 处理推送流事件，返回需要执行的 tea.Cmd（读秒计时循环的启动）
 func (m *model) handleEvent(ev client.Event) tea.Cmd {
-	// core 全推，每帧带 agent_id，这里只留当前 agent 的。审批例外：不管在看谁都要弹。
-	// 没有 agent_id 的帧（statusline）是进程级的。
+	// 每帧带 root（哪段对话）与 session_id（谁说的）。只留当前这段的；审批例外，不管在看哪段都要弹。
+	// 没有 root 的帧是进程级的（statusline）或回放出来的（已经按对话取过了）。
 	var who struct {
-		AgentID int `json:"agent_id"`
+		SessionID string `json:"session_id"`
+		Root      string `json:"root"`
 	}
 	jsonUnmarshal(ev.Payload, &who)
-	if ev.Type != "permission_request" && who.AgentID != 0 && who.AgentID != m.client.AgentID() {
+	cur := m.client.SessionID()
+	switch {
+	case ev.Type == "permission_request" || who.Root == "":
+	case who.Root != cur:
+		return nil
+	case who.SessionID != who.Root:
+		m.subEvent(ev)
 		return nil
 	}
 
@@ -684,6 +703,12 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		}
 		jsonUnmarshal(ev.Payload, &d)
 		m.approval = &pendingApproval{id: d.ID, tool: d.Tool, params: string(d.Params)}
+		switch {
+		case who.Root != "" && who.Root != cur:
+			m.approval.from = "另一段对话"
+		case who.SessionID != who.Root:
+			m.approval.from = "子任务"
+		}
 		return m.busy.begin("等待你的审批", time.Now())
 
 	case "interrupted":
@@ -714,6 +739,29 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 		m.closeLine()
 	}
 	return nil
+}
+
+// subEvent 画子 agent 的动静：一行一条，缩进挂在父对话里。正文与思考不铺开——
+// 两段文字交错着长，行流就乱了；它干完了什么，完成通知会以 user 消息回到父对话。
+// 读秒行与 awaiting 只归父对话管：子 agent 收工不是这段对话收工。
+func (m *model) subEvent(ev client.Event) {
+	var d struct {
+		Text   string `json:"text"`
+		Name   string `json:"name"`
+		Status int    `json:"status"`
+	}
+	jsonUnmarshal(ev.Payload, &d)
+	switch ev.Type {
+	case "message_start":
+		task, _, _ := strings.Cut(d.Text, "\n")
+		m.emit("sub", "  ↳ 子任务："+task)
+	case "tool_execution_start":
+		m.emit("sub", "  ↳   🔧 "+d.Name)
+	case "interrupted":
+		m.emit("sub", "  ↳ 子任务已中断")
+	case "agent_end":
+		m.emit("sub", "  ↳ 子任务收工")
+	}
 }
 
 // deltaOf 取事件载荷里的 delta 字段（message_update / thinking_update 同构）
@@ -842,40 +890,6 @@ func renderPlugins(data json.RawMessage) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderSessions 把 /new /resume 的会话清单渲染为多行 info 文本，当前会话打 ▸。
-func renderSessions(command string, data json.RawMessage, agentID int) string {
-	var list []client.SessionInfo
-	if err := json.Unmarshal(data, &list); err != nil {
-		return describeCommand(command)
-	}
-	// 「当前」= 被我这个 agent 打开着的那一条
-	var cur client.SessionInfo
-	for _, s := range list {
-		if s.OpenedBy == agentID {
-			cur = s
-		}
-	}
-	if command == "new" {
-		return "✅ 已新建会话 " + cur.ID + "（对话历史已清空，旧会话留在盘上）"
-	}
-	if len(list) == 0 {
-		return "📄 还没有任何会话"
-	}
-	out := []string{fmt.Sprintf("📄 会话 %d 个（当前 %s，共 %d 条消息）", len(list), cur.ID, cur.Messages)}
-	for _, s := range list {
-		mark := "  "
-		if s.OpenedBy == agentID {
-			mark = "▸ "
-		}
-		title := s.Title
-		if title == "" {
-			title = "（空会话）"
-		}
-		out = append(out, fmt.Sprintf("%s%s  %s  %d 条", mark, s.ID, title, s.Messages))
-	}
-	return strings.Join(out, "\n")
-}
-
 // renderModels 把 /model 结果（[]ModelInfo JSON）渲染为多行 info 文本。
 // 每行：标记 名称 [供应商] 上下文；● 是当前主模型。切换用 /model <name>。
 func renderModels(data json.RawMessage) string {
@@ -924,7 +938,11 @@ func renderApproval(p *pendingApproval, width int) []string {
 	if p.params != "" {
 		desc += " " + p.params
 	}
-	head := fit("🔐 权限请求: "+desc, width) // 按显示宽截，不切碎中文
+	from := ""
+	if p.from != "" {
+		from = "（" + p.from + "）"
+	}
+	head := fit("🔐 权限请求"+from+": "+desc, width) // 按显示宽截，不切碎中文
 	return []string{
 		approvalStyle.Render(head),
 		approvalStyle.Render("   [y] 允许    [n] 拒绝"),
@@ -942,23 +960,23 @@ func main() {
 	if len(args) > 0 {
 		addr = args[0]
 	}
-	c := client.New(addr)
-	// 退出时通知 core（ADR-0021）
-	defer c.CloseGroup()
-
-	// core 不自动建 agent：workdir 由客户端给，它知道用户站在哪
+	// workdir 由客户端给：它知道用户站在哪，core 不猜
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "取不到当前目录:", err)
 		os.Exit(1)
 	}
-	if err := c.CreateAgent(wd); err != nil {
+	c := client.New(addr, wd)
+	// 退出时通知 core（ADR-0021）
+	defer c.CloseGroup()
+
+	// 首启引导（setup.go）：settings.json 里 setup_done 不为 true 就先走一遍
+	s, err := c.FetchSetup()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "连不上 core:", err)
 		os.Exit(1)
 	}
-
-	// 首启引导（setup.go）：settings.json 里 setup_done 不为 true 就先走一遍
-	if s, err := c.FetchSetup(); err == nil && (force || !s.Done) {
+	if force || !s.Done {
 		runSetup(c, s)
 	}
 

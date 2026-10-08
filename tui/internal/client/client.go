@@ -19,8 +19,9 @@ type Client struct {
 	hc   *http.Client
 	addr string
 
-	agentID  int    // 当前在跟哪个 agent 说话；动 agent 的端点都要指名
-	clientID string // 本进程一个，不落盘
+	clientID  string // 本进程一个，不落盘
+	workdir   string // 用户站在哪；core 不猜（ADR-0019）
+	sessionID string // 当前那段对话。新对话的 id 由这里生成，第一条消息到了 core 才开出它（ADR-0029）
 }
 
 // Reply 是请求-响应端点的通用响应
@@ -30,7 +31,6 @@ type Reply struct {
 	Ok      bool            `json:"ok,omitempty"`
 	Command string          `json:"command,omitempty"`
 	Data    json.RawMessage `json:"data,omitempty"` // 斜杠命令结果载荷
-	AgentID int             `json:"agent_id,omitempty"`
 }
 
 // Command 是一条斜杠命令（GET /commands）
@@ -41,34 +41,41 @@ type Command struct {
 	Kind         string `json:"kind"` // "builtin" | "prompt"
 }
 
-// New 创建客户端。addr 形如 "127.0.0.1:12345"。
-func New(addr string) *Client {
+// New 创建客户端。addr 形如 "127.0.0.1:12345"，workdir 是对话在哪个目录里开。
+func New(addr, workdir string) *Client {
+	return &Client{
+		hc:        &http.Client{Timeout: 120 * time.Second},
+		addr:      addr,
+		clientID:  randomID(),
+		workdir:   workdir,
+		sessionID: randomID(),
+	}
+}
+
+func randomID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	return &Client{
-		hc:       &http.Client{Timeout: 120 * time.Second},
-		addr:     addr,
-		clientID: hex.EncodeToString(b[:]),
-	}
+	return hex.EncodeToString(b[:])
 }
 
-// CreateAgent 建一个 agent 并记住它。workdir 由客户端给：它知道用户站在哪，core 不知道。
-func (c *Client) CreateAgent(workdir string) error {
-	r, err := c.postJSON("/agent", map[string]any{"workdir": workdir})
-	if err != nil {
-		return err
+func (c *Client) SessionID() string { return c.sessionID }
+
+// Use 换到一段已有的对话。
+func (c *Client) Use(sessionID string) { c.sessionID = sessionID }
+
+// Fresh 换到一段新对话。
+func (c *Client) Fresh() { c.sessionID = randomID() }
+
+// conv 补上「我是谁、在哪、说的是哪段」：动对话的端点都要这三样
+func (c *Client) conv(body map[string]any) map[string]any {
+	if body == nil {
+		body = map[string]any{}
 	}
-	if r.AgentID <= 0 {
-		return fmt.Errorf("建 agent 失败: %s", r.Error)
-	}
-	c.agentID = r.AgentID
-	return nil
+	body["client_id"] = c.clientID
+	body["workdir"] = c.workdir
+	body["session_id"] = c.sessionID
+	return body
 }
-
-func (c *Client) AgentID() int { return c.agentID }
-
-// Attach 改连到另一个 agent。
-func (c *Client) Attach(agentID int) { c.agentID = agentID }
 
 // Frame 是一条回放帧，与推送流的帧同形（ADR-0020）
 type Frame struct {
@@ -76,24 +83,21 @@ type Frame struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// FetchSession 取一个 agent 当前会话，回放成事件帧（GET /session）。
-func (c *Client) FetchSession(agentID int) ([]Frame, error) {
+// FetchSession 取一段对话，回放成事件帧（GET /session）。读的是盘上那份。
+func (c *Client) FetchSession(sessionID string) ([]Frame, error) {
 	var f []Frame
-	err := c.getJSON("/session", &f, map[string]any{"agent_id": agentID})
+	err := c.getJSON("/session", &f, map[string]any{"workdir": c.workdir, "session_id": sessionID})
 	return f, err
 }
 
-// SendTo 往指定 agent 发一条消息。
-func (c *Client) SendTo(agentID int, message string) (Reply, error) {
-	return c.postJSON("/message", map[string]any{"agent_id": agentID, "message": message})
+// Send 往当前对话发。core 立即返回 {"status":"processing"}，回复走推送流。
+func (c *Client) Send(message string) (Reply, error) {
+	return c.postJSON("/message", c.conv(map[string]any{"message": message}))
 }
 
-// Send 往当前 agent 发。core 立即返回 {"status":"processing"}，回复走推送流。
-func (c *Client) Send(message string) (Reply, error) { return c.SendTo(c.agentID, message) }
-
-// Interrupt 中断当前 agent（POST /interrupt）
+// Interrupt 停下当前对话，连同它派生出去的（POST /interrupt）
 func (c *Client) Interrupt() error {
-	_, err := c.postJSON("/interrupt", map[string]any{"agent_id": c.agentID})
+	_, err := c.postJSON("/interrupt", c.conv(nil))
 	return err
 }
 
@@ -106,11 +110,18 @@ func (c *Client) RespondApproval(id string, allow bool) error {
 	return err
 }
 
-// FetchCommands 拉取斜杠命令列表。带 agentID：plugin 命令跟着那个 agent 的工作目录走。
-func (c *Client) FetchCommands(agentID int) ([]Command, error) {
+// FetchCommands 拉取斜杠命令列表：plugin 命令跟着工作目录走。
+func (c *Client) FetchCommands() ([]Command, error) {
 	var cmds []Command
-	err := c.getJSON("/commands", &cmds, map[string]any{"agent_id": agentID})
+	err := c.getJSON("/commands", &cmds, map[string]any{"workdir": c.workdir})
 	return cmds, err
+}
+
+// FetchSessions 拉这个目录下的对话清单（GET /sessions），最近的在前。
+func (c *Client) FetchSessions() ([]SessionInfo, error) {
+	var l []SessionInfo
+	err := c.getJSON("/sessions", &l, c.conv(nil))
+	return l, err
 }
 
 // do 发一个请求，把 JSON 响应解到 out。core 的 GET 也从 JSON 体读参数。
@@ -161,29 +172,13 @@ type ModelInfo struct {
 	Current bool   `json:"current"`
 }
 
-// SessionInfo 是会话清单的一条。OpenedBy 是打开着它的 agent（没人打开为 0）。
+// SessionInfo 是对话清单的一条。State：running = 正在跑，elsewhere = 在别的窗口里开着，空 = 都不是。
 type SessionInfo struct {
 	ID       string `json:"id"`
 	Title    string `json:"title"`
 	Messages int64  `json:"messages"`
 	Mtime    int64  `json:"mtime"`
-	OpenedBy int    `json:"opened_by"`
-}
-
-// AgentInfo 是 GET /agents 的一条
-type AgentInfo struct {
-	ID        int    `json:"id"`
-	Workdir   string `json:"workdir"`
-	State     string `json:"state"` // running | idle
-	SessionID string `json:"session_id"`
-	InEdges   []int  `json:"in_edges"`
-	OutEdges  []int  `json:"out_edges"`
-}
-
-func (c *Client) FetchAgents() ([]AgentInfo, error) {
-	var a []AgentInfo
-	err := c.getJSON("/agents", &a)
-	return a, err
+	State    string `json:"state"`
 }
 
 // Statusline 是 GET /statusline。配了模型表外的模型时 OwnedBy / Context 为空。

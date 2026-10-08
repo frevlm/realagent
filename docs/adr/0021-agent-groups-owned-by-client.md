@@ -42,6 +42,10 @@
 
 那个表挂在 `on_tick` 上（事件循环每轮已经在做 statusline 比对与事件 flush），**零新线程**。
 
+- 实况注（2026-10-08）：[[ADR-0026]] 换成 HTTP/1.1 + WebSocket 之后没有事件循环了，`on_tick` 随之消失。断线时刻记在 `Server` 里（同一个 `client_id` 的最后一条 `/events` 连接断开那一刻），`main` 里一条 reaper 线程每 5 秒取一次「断线满 60 秒」的 client 关组。测活靠的是 WebSocket 读失败，不是 QUIC PING。
+
+- 实况注（2026-10-08）：组隔离此前只在协议文档里成立，core 一直没读 `client_id`。现已落地：`Agents` 按组存节点；推送帧与 `permission_request` 只发给那一组的连接（每个 agent 拿一份事件出口绑定到本组的 `CoreContext`）；「有没有客户端能裁决」也按组判。
+
 **关组的顺序写死**：先 `interrupt` 组内每个在跑的 agent，等它们停在检查点，再逐个 close。直接 close 一个正在跑的 agent，它的线程会往一个已经拆掉的收件箱里写。
 
 ### 4. 「agent 没有客户端也跑」的范围被缩小了，这是有意的

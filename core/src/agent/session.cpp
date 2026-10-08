@@ -82,8 +82,8 @@ std::string str(const nlohmann::json &j, const char *key)
 
 } // namespace
 
-Session::Session(std::string dir)
-    : dir_(std::move(dir)), id_(make_id()), path_(path_of(dir_, id_).string())
+Session::Session(std::string dir, std::string id)
+    : dir_(std::move(dir)), id_(id.empty() ? make_id() : std::move(id)), path_(path_of(dir_, id_).string())
 {
 }
 
@@ -109,8 +109,19 @@ bool Session::resume(const std::string &id, nlohmann::json &out)
     return true;
 }
 
+std::string sessions_dir(const std::string &workdir)
+{
+    return (fs::path(workdir) / ".realagent" / "sessions").string();
+}
+
+bool Session::exists(const std::string &dir, const std::string &id)
+{
+    return fs::exists(path_of(dir, id));
+}
+
 bool Session::read(const std::string &dir, const std::string &id, nlohmann::json &out)
 {
+    if (id.empty() || id.find('/') != std::string::npos) return false;
     const fs::path p = path_of(dir, id);
     std::ifstream f(p);
     if (!f) return false;

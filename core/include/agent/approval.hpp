@@ -12,6 +12,8 @@
 #include <string>
 #include <unordered_map>
 
+#include "agent/context.hpp"
+
 namespace realagent {
 
 /* Ask 不是第三种结论，是"得问人"；问完只有放行与拒绝。 */
@@ -35,17 +37,10 @@ class ApprovalCoordinator {
     ApprovalCoordinator() = default;
     ~ApprovalCoordinator();
 
-    void set_emit(std::function<void(const std::string &type, const std::string &payload)> emit)
-    {
-        emit_ = std::move(emit);
-    }
-
-    /* 有没有客户端能裁决；没有就别问。 */
-    void set_online(std::function<bool()> fn) { online_ = std::move(fn); }
-    bool online() const { return !online_ || online_(); }
-
-    /* agent 线程：发 permission_request，阻塞到裁决或 30 秒超时（deny）。 */
-    Verdict await(int agent_id, const std::string &tool_name, const std::string &params);
+    /* agent 线程：从 emit 发 permission_request，阻塞到裁决或 30 秒超时（deny）。
+     * emit 是那个 agent 的事件出口，于是只有它那一组的客户端被问到。 */
+    Verdict await(int agent_id, const std::string &tool_name, const std::string &params,
+                  const EmitFn &emit);
 
     /* 事件循环线程：收到裁决。 */
     void respond(const std::string &id, bool allow);
@@ -56,8 +51,6 @@ class ApprovalCoordinator {
   private:
     void cancel_all();
 
-    std::function<bool()> online_;
-    std::function<void(const std::string &, const std::string &)> emit_;
     std::mutex mtx_;
     std::unordered_map<std::string, std::shared_ptr<PendingApproval>> pending_;
     uint64_t next_id_ = 1;

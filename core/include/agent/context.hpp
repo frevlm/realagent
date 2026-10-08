@@ -1,5 +1,8 @@
 /*
- * context.hpp — 进程级的共享东西：配置、模型表、事件出口、MCP 连接池
+ * context.hpp — agent 够得着的外部东西：配置、模型表、事件出口、MCP 连接池
+ *
+ * 配置、模型表、连接池是进程级的；事件出口与 online 是一组的——每个 agent 拿一份拷贝，
+ * 帧只推给自己那一组的客户端，审批只问自己那一组的客户端（ADR-0021）。
  */
 #pragma once
 
@@ -21,6 +24,8 @@ struct CoreContext {
     const Pricing *pricing = nullptr;
     EmitFn emit_fn;
     McpHub *mcp = nullptr;
+    /* 此刻有没有客户端能裁决审批；不设当作有。 */
+    std::function<bool()> online;
 };
 
 } // namespace realagent

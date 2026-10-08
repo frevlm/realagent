@@ -10,7 +10,7 @@ nlohmann::json spawn_def()
     return tool_def(
         "spawn", "派生 agent",
         "Spawn a new agent in the background. Returns the new agent's numeric id immediately\n"
-        "without waiting for it to finish.\n"
+        "(followed by its session id, which you can ignore) without waiting for it to finish.\n"
         "Agent ids are positive integers incrementing from 1 (1, 2, 3, ...).\n"
         "in_edges: agent ids permitted to send messages to the new agent and receive its\n"
         "completion notice.\n"

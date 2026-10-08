@@ -5,7 +5,6 @@
 #include <curl/curl.h>
 
 #include <cstdio>
-#include <filesystem>
 
 namespace realagent {
 
@@ -13,10 +12,16 @@ using nlohmann::json;
 
 namespace {
 
-std::string session_dir_of(const std::string &workdir, bool sub)
+/* 每帧带上是哪段对话的：session_id 是自己的，root 是用户看见的那段（ADR-0029）。
+ * 载荷都是 dump 出来的 JSON 对象，往开头那个 { 后面插两个键即可，不必再解析一遍。 */
+EmitFn stamped(EmitFn inner, const std::string &session_id, const std::string &root)
 {
-    const std::filesystem::path base = std::filesystem::path(workdir) / ".realagent" / "sessions";
-    return (sub ? base / "sub" : base).string();
+    if (!inner) return inner;
+    std::string head = json{{"session_id", session_id}, {"root", root}}.dump();
+    head.pop_back(); // 去掉收尾的 }
+    return [inner = std::move(inner), head](const std::string &type, const std::string &payload) {
+        inner(type, payload.size() <= 2 ? head + "}" : head + "," + payload.substr(1));
+    };
 }
 
 json text_block(std::string text) { return json{{"type", "text"}, {"text", std::move(text)}}; }
@@ -40,22 +45,27 @@ constexpr int kMaxStall = 3;
 
 } // namespace
 
-Agent::Agent(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir, int id,
-             Agents *pool, bool sub, std::string def_body)
-    : ctx_(ctx), pool_(pool), id_(id), workdir_(std::move(workdir)),
-      mcp_(ctx.mcp ? ctx.mcp->open(workdir_, ctx.config->get_json("mcp_http_bridge"))
-                   : McpHub::Lease{}),
+Agent::Agent(CoreContext ctx, ApprovalCoordinator &approval, std::string workdir, int id,
+             Agents *pool, std::string session_dir, std::string root, std::string def_body,
+             std::string session_id)
+    : ctx_(std::move(ctx)), pool_(pool), id_(id), workdir_(std::move(workdir)),
+      mcp_(ctx_.mcp ? ctx_.mcp->open(workdir_, ctx_.config->get_json("mcp_http_bridge"))
+                    : McpHub::Lease{}),
       hooks_(Hooks::scan(workdir_)), agent_defs_(scan_agent_defs(workdir_)),
-      exe_(ctx, approval, workdir_, pool_, id_, &mcp_, &hooks_, &agent_defs_),
-      skills_(scan_skills(workdir_)), commands_(scan_commands(workdir_)),
-      session_dir_(session_dir_of(workdir_, sub)), session_(session_dir_),
-      def_body_(std::move(def_body))
+      exe_(ctx_, approval, workdir_, pool_, id_, &mcp_, &hooks_, &agent_defs_),
+      skills_(scan_skills(workdir_)),
+      session_dir_(session_dir.empty() ? sessions_dir(workdir_) : std::move(session_dir)),
+      session_(session_dir_, std::move(session_id)), loaded_(false), def_body_(std::move(def_body))
 {
+    // loaded_ 为 false：第一次跑时从盘上读，盘上没有就是空的——新开与接着说是同一条路
+    root_ = root.empty() ? session_.id() : std::move(root);
+    ctx_.emit_fn = stamped(std::move(ctx_.emit_fn), session_.id(), root_);
     for (const std::string &e : plugin_errors()) fprintf(stderr, "[plugin] %s\n", e.c_str());
     if (!mcp_.tools.empty())
         fprintf(stderr, "[mcp] agent %d: %zu servers, %zu tools\n", id_, mcp_.conns.size(),
                 mcp_.tools.size());
-    session_start_hook("startup"); // 会阻塞建 agent，每个 hook 最多它自己的 timeout
+    // 会阻塞建 agent，每个 hook 最多它自己的 timeout
+    session_start_hook(Session::exists(session_dir_, session_.id()) ? "resume" : "startup");
     loop_ = std::thread([this] { loop(); });
 }
 
@@ -77,11 +87,11 @@ std::vector<std::string> Agent::plugin_errors() const
     return all;
 }
 
-void Agent::post(std::string message)
+void Agent::post(std::string message, bool notice)
 {
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        inbox_.push_back(std::move(message));
+        inbox_.push_back({std::move(message), notice});
     }
     cv_.notify_one();
 }
@@ -92,28 +102,6 @@ void Agent::ensure_loaded()
     if (!Session::read(session_dir_, session_.id(), messages_))
         messages_ = json::array(); // 还没写过盘
     loaded_ = true;
-}
-
-void Agent::reset()
-{
-    messages_ = json::array();
-    loaded_ = true;
-    session_ = Session(session_dir_);
-    run_cost_ = 0;
-    abort_.store(false);
-}
-
-bool Agent::resume(const std::string &id)
-{
-    json loaded;
-    Session s(session_dir_);
-    if (!s.resume(id, loaded)) return false;
-    session_ = std::move(s);
-    messages_ = std::move(loaded);
-    loaded_ = true;
-    run_cost_ = 0;
-    abort_.store(false);
-    return true;
 }
 
 void Agent::record(json msg)
@@ -141,13 +129,11 @@ std::string Agent::last_text() const
     return {};
 }
 
-/* 每帧带 agent_id；core 不过滤，客户端自己挑。 */
+/* 是谁的帧由 emit_fn 自己盖章（stamped），这里只管载荷是个对象。 */
 void Agent::broadcast(const std::string &type, const json &payload)
 {
     if (!ctx_.emit_fn) return;
-    json ev = payload.is_object() ? payload : json::object();
-    ev["agent_id"] = id_;
-    ctx_.emit_fn(type, ev.dump());
+    ctx_.emit_fn(type, (payload.is_object() ? payload : json::object()).dump());
 }
 
 /* —— LLM 调用 —— */
@@ -307,6 +293,7 @@ void Agent::start_run(std::unique_lock<std::mutex> &busy)
     ensure_loaded();
     run_begin_ = messages_.size();
     recap_.clear();
+    asked_ = false;
     stall_ = 0;
     run_cost_ = 0;
     abort_.store(false);
@@ -329,7 +316,9 @@ void Agent::finish_run(std::unique_lock<std::mutex> &busy)
         }
     }
     busy.unlock(); // on_done 要动别的 agent，别攥着自己的锁
-    if (pool_) pool_->on_done(id_, summary);
+    // 两种收工不通知邻居：只由完成通知唤醒的那一趟（那只是回声，环上会无限互相唤醒）；
+    // 被中断的那一趟（没跑完，而且用户正要停下整段对话，通知会把刚停下的又叫醒）
+    if (pool_ && asked_ && !abort_.load()) pool_->on_done(id_, summary);
 }
 
 /* —— 入账 —— */
@@ -344,12 +333,12 @@ void Agent::record_user(const std::string &text)
 /* 收件箱只在 turn 开头取，于是模型思考或跑工具时不会被打断。 */
 void Agent::take_inbox()
 {
-    std::deque<std::string> incoming;
+    std::deque<Mail> incoming;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         incoming.swap(inbox_);
     }
-    for (const std::string &m : incoming)
+    for (const auto &[m, notice] : incoming)
     {
         // UserPromptSubmit 的注入附在消息后面，不进 system prompt（那会打碎 prompt cache）
         const HookOutcome h = hooks_.run(HookEvent::UserPromptSubmit,
@@ -359,6 +348,7 @@ void Agent::take_inbox()
             fprintf(stderr, "[hook] UserPromptSubmit 拦下一条消息：%s\n", h.reason.c_str());
             continue;
         }
+        asked_ = asked_ || !notice;
         record_user(h.inject.empty() ? m : m + "\n\n" + h.inject);
     }
 }

@@ -25,18 +25,10 @@
       </a>
     </div>
 
-    <div class="side-section">
-      <div class="side-label">
-        <span>Agent</span>
-        <button class="btn btn-ghost btn-icon btn-sm" id="new-agent" title="新建 agent"><svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
-      </div>
-      <nav class="agent-list" id="agent-list"></nav>
-    </div>
-
     <div class="side-section side-grow">
       <div class="side-label">
-        <span>会话</span>
-        <button class="btn btn-ghost btn-icon btn-sm" id="new-session" title="新会话"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M12 7v6"/><path d="M9 10h6"/></svg></button>
+        <span>对话</span>
+        <button class="btn btn-ghost btn-icon btn-sm" id="new-session" title="新对话"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M12 7v6"/><path d="M9 10h6"/></svg></button>
       </div>
       <nav class="session-list" id="session-list"></nav>
     </div>
@@ -72,7 +64,7 @@
       <div class="empty" id="empty" hidden>
         <span class="empty-mark"><svg class="icon" viewBox="0 0 24 24"><path d="m6 8 4 4-4 4"/><path d="M13 16h5"/></svg></span>
         <h1>有什么要做的？</h1>
-        <p class="text-3">消息发给 <span id="empty-agent"></span>，它在 <span class="mono" id="empty-dir"></span> 里工作。</p>
+        <p class="text-3">在 <span class="mono" id="empty-dir"></span> 里工作。</p>
       </div>
     </section>
 
@@ -85,7 +77,7 @@
         </div>
         <div class="composer">
           <div class="menu slash" id="slash" hidden></div>
-          <textarea id="input" rows="1" placeholder="给 agent 发消息"></textarea>
+          <textarea id="input" rows="1" placeholder="发消息"></textarea>
           <button class="btn btn-primary btn-icon" id="send" title="发送" disabled><svg class="icon" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
           <button class="btn btn-dark btn-icon" id="stop" title="中断（Esc）" hidden><svg class="icon" viewBox="0 0 24 24"><rect width="10" height="10" x="7" y="7" rx="1.5" fill="currentColor" stroke="none"/></svg></button>
         </div>
@@ -93,21 +85,6 @@
       </div>
     </footer>
   </main>
-</div>
-
-<div class="modal-back" id="modal" hidden>
-  <form class="modal" id="agent-form">
-    <h2 class="modal-title">新建 agent</h2>
-    <p class="text-3 small">agent 在这个目录里读写文件、跑命令。</p>
-    <div class="field">
-      <label class="form-label" for="agent-dir">工作目录</label>
-      <input class="form-control mono" id="agent-dir" autocomplete="off" spellcheck="false">
-    </div>
-    <div class="modal-actions">
-      <button type="button" class="btn btn-secondary" id="agent-cancel">取消</button>
-      <button type="submit" class="btn btn-primary">创建</button>
-    </div>
-  </form>
 </div>
 
 <div class="setup" id="setup" hidden></div>

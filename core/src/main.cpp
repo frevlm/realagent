@@ -5,10 +5,13 @@
 #include <mach-o/dyld.h>
 #endif
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <thread>
 
 #include "agent/agents.hpp"
 #include "agent/command.hpp"
@@ -78,82 +81,68 @@ int main()
     if (const std::string e = endpoint_config_error(cfg); !e.empty()) fprintf(stderr, "[config] %s\n", e.c_str());
 
     ApprovalCoordinator approval;
-    approval.set_emit(ctx.emit_fn);
-    Agents pool(ctx, approval);
+    // 一组 agent 的事件只推给那个客户端，审批也只问它（ADR-0021）
+    Agents pool(
+        [&ctx, &server](const std::string &client) {
+            CoreContext c = ctx;
+            c.emit_fn = [&server, client](const std::string &type, const std::string &payload) {
+                server.push_to(client, type, payload);
+            };
+            c.online = [&server, client] { return server.has_client(client); };
+            return c;
+        },
+        approval);
 
-    approval.set_online([&server] { return server.has_client(); });
-
-    /* 按 agent_id 找到 agent 再交给 f；找不到回错误。 */
-    const auto with_agent = [&pool](auto f) -> Handler {
-        return [&pool, f](const std::string &body) {
-            const json j = parse_body(body);
-            const int id = j.value("agent_id", 0);
-            Agent *a = pool.find(id);
-            if (!a) return command_error("无此 agent: " + std::to_string(id));
-            return f(*a, j);
-        };
-    };
-    /* 请求那一队里不等锁：agent 正在跑就当场回 AGENT_BUSY。 */
-    const auto when_idle = [&with_agent](auto f) -> Handler {
-        return with_agent([f](Agent &a, const json &j) {
-            auto lk = a.try_lock();
-            return lk.owns_lock() ? f(a, j) : command_error(AGENT_BUSY);
-        });
-    };
-
-    server.route("POST", "/agent", [&pool](const std::string &body) {
+    /* 一条消息（或展开好的 prompt 命令）发进一段对话。agent 在这里才建出来，
+     * 所以没有从没说过话的 agent（ADR-0029）。 */
+    const auto submit = [&](const json &j, const std::string &text) {
+        // 每条现算：POST /setup 会在运行中把端点配齐
+        if (std::string e = endpoint_config_error(cfg); !e.empty()) return command_error(e);
         std::string err;
-        const int id = pool.create(parse_body(body).value("workdir", ""), 0, {}, {}, err);
-        if (id <= 0) return command_error(err);
-        return json{{"ok", true}, {"agent_id", id}}.dump();
-    });
-    server.route("GET", "/agents", [&pool](const std::string &) { return pool.list().dump(); });
+        const auto a = pool.open(j.value("client_id", ""), j.value("workdir", ""), j.value("session_id", ""), err);
+        if (!a) return command_error(err);
+        a->post(text);
+        return std::string(R"({"status":"processing"})");
+    };
+    const auto command = [&](const json &j, const std::string &input) {
+        const auto a = pool.find(j.value("client_id", ""), j.value("session_id", ""));
+        const CommandOutcome o = run_command(ctx, j.value("workdir", ""), a.get(), input);
+        return o.reply.empty() ? submit(j, o.post) : o.reply;
+    };
 
-    server.route("GET", "/commands", [&pool](const std::string &body) {
-        // agent_id 可选：不带就只有内置命令
-        return command_defs(pool.find(parse_body(body).value("agent_id", 0))).dump();
+    server.route("POST", "/message", [&](const std::string &body) {
+        const json j = parse_body(body);
+        const std::string msg = j.value("message", "");
+        if (msg.empty()) return command_error("empty message");
+        return msg[0] == '/' ? command(j, msg) : submit(j, msg);
+    });
+    server.route("POST", "/command", [&](const std::string &body) {
+        const json j = parse_body(body);
+        std::string cmd = j.value("command", "");
+        if (cmd.empty()) return command_error("empty command");
+        if (cmd[0] != '/') cmd.insert(cmd.begin(), '/');
+        return command(j, cmd);
+    });
+    server.route("GET", "/commands", [](const std::string &body) {
+        return command_defs(parse_body(body).value("workdir", "")).dump();
     });
 
-    const Handler session_get = with_agent([](Agent &a, const json &) {
-        return Session::read_frames(a.session_dir(), a.session_id()).dump();
-    });
+    // 读的是盘上那份，不需要 agent 在场。派生的 agent 落在 sub/，嵌在父对话里看时也从这里取
+    const Handler session_get = [](const std::string &body) {
+        const json j = parse_body(body);
+        const std::string dir = sessions_dir(j.value("workdir", "")), id = j.value("session_id", "");
+        return (Session::exists(dir, id) ? Session::read_frames(dir, id) : Session::read_frames(dir + "/sub", id)).dump();
+    };
     server.route("GET", "/session", session_get);
     server.route("GET", "/history", session_get);
+    server.route("GET", "/sessions", [&pool](const std::string &body) {
+        const json j = parse_body(body);
+        return sessions_payload(pool, j.value("client_id", ""), j.value("workdir", "")).dump();
+    });
 
-    server.route("POST", "/message", with_agent([&](Agent &a, const json &j) {
-                     const std::string msg = j.value("message", "");
-                     if (msg.empty()) return command_error("empty message");
-                     if (msg[0] == '/') return handle_command(ctx, pool, a, msg);
-                     // 每条现算：POST /setup 会在运行中把端点配齐
-                     if (std::string e = endpoint_config_error(cfg); !e.empty()) return command_error(e);
-                     a.post(msg);
-                     return std::string(R"({"status":"processing"})");
-                 }));
-    server.route("POST", "/command", with_agent([&](Agent &a, const json &j) {
-                     std::string cmd = j.value("command", "");
-                     if (cmd.empty()) return command_error("empty command");
-                     if (cmd[0] != '/') cmd.insert(cmd.begin(), '/');
-                     return handle_command(ctx, pool, a, cmd);
-                 }));
-
-    server.route("GET", "/sessions", when_idle([&pool](Agent &a, const json &) {
-                     return sessions_payload(pool, a).dump();
-                 }));
-    server.route("POST", "/session", when_idle([&pool](Agent &a, const json &j) {
-                     const std::string sid = j.value("id", "");
-                     if (sid.empty())
-                         a.reset();
-                     else if (!a.resume(sid))
-                         return command_error("unknown session: " + sid);
-                     return json{{"ok", true}, {"data", sessions_payload(pool, a)}}.dump();
-                 }));
-
-    server.route("POST", "/interrupt", [&](const std::string &body) {
-        if (Agent *a = pool.find(parse_body(body).value("agent_id", 0)))
-        {
-            a->interrupt();
-            approval.cancel(a->id());
-        }
+    server.route("POST", "/interrupt", [&pool](const std::string &body) {
+        const json j = parse_body(body);
+        pool.interrupt(j.value("client_id", ""), j.value("session_id", ""));
         return std::string(R"({"status":"ok"})");
     });
     server.route("POST", "/approval-response", [&approval](const std::string &body) {
@@ -161,8 +150,10 @@ int main()
         approval.respond(j.value("id", ""), j.value("allow", false));
         return std::string(R"({"status":"ok"})");
     });
-    // 客户端退出前会调；core 这边没有要收尾的东西
-    server.route("POST", "/group/close", [](const std::string &) { return std::string(R"({"ok":true})"); });
+    server.route("POST", "/group/close", [&pool](const std::string &body) {
+        pool.close_group(parse_body(body).value("client_id", ""));
+        return std::string(R"({"ok":true})");
+    });
 
     server.route("GET", "/statusline", [&ctx](const std::string &) { return statusline_payload(ctx).dump(); });
 
@@ -191,6 +182,15 @@ int main()
             last_statusline = std::move(cur);
             server.push_event("statusline", last_statusline);
         }
+    });
+
+    // 断线满 60 秒还没回来就关组（ADR-0021 §3）。60 是选定的数，不是推导出来的
+    std::jthread reaper([&server, &pool](std::stop_token st) {
+        std::mutex m;
+        std::condition_variable_any cv;
+        std::unique_lock<std::mutex> lk(m);
+        while (!cv.wait_for(lk, st, std::chrono::seconds(5), [] { return false; }) && !st.stop_requested())
+            for (const std::string &c : server.gone_for(std::chrono::seconds(60))) pool.close_group(c);
     });
 
     return server.run(12345) ? 0 : 1;

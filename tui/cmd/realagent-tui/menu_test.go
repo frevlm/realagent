@@ -12,14 +12,14 @@ import (
 )
 
 var testCmds = []client.Command{
-	{Name: "new", Description: "新建会话，清空当前对话"},
-	{Name: "resume", Description: "查看当前会话消息数"},
+	{Name: "model", Description: "查看模型清单"},
+	{Name: "plugins", Description: "查看装了哪些 plugin"},
 }
 
 func testModel() model {
-	// 带一个没连过的 client：渲染路径要问它 AgentID（会话清单靠它认哪条是自己的）。
+	// 带一个没连过的 client：渲染路径要问它当前是哪段对话。
 	// New 不连接，构造是纯本地的
-	return model{commands: testCmds, client: client.New("127.0.0.1:1")}
+	return model{commands: testCmds, client: client.New("127.0.0.1:1", "/tmp")}
 }
 
 // typed 造一个输入了 s 的模型（光标在末尾）
@@ -70,8 +70,9 @@ func TestMenuMatches(t *testing.T) {
 	}{
 		{"", nil},
 		{"hello", nil},
-		{"/", []string{"new", "resume", "statusline", "agents", "quit"}},
+		{"/", []string{"model", "plugins", "statusline", "new", "resume", "quit"}},
 		{"/n", []string{"new"}},
+		{"/m", []string{"model"}},
 		{"/re", []string{"resume"}},
 		{"/q", []string{"quit"}}, // 本地命令与远端命令在菜单里没有区别
 		{"/xyz", nil},
@@ -183,8 +184,8 @@ func TestPeerMessageRendered(t *testing.T) {
 
 func TestTabCompletes(t *testing.T) {
 	m, _ := typed("/").handleKey(key(tea.KeyTab))
-	if v := m.ed.value(); v != "/new" {
-		t.Errorf("Tab 应补全为 /new，got %q", v)
+	if v := m.ed.value(); v != "/model" {
+		t.Errorf("Tab 应补全为首项 /model，got %q", v)
 	}
 }
 

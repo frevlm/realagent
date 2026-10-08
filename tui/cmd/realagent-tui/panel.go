@@ -2,7 +2,7 @@
 //
 // 面板 = 一列可选项 + 一个高亮下标，每项自带确认时要发的整条命令（submit）。
 // 确认就是把 submit 写进输入框走 submitInput，与手打同一条路。
-// 数据来自 /model /resume 回包里本来就有的 data 载荷。
+// 数据来自 /model 回包里的 data 载荷，/resume 的来自 GET /sessions。
 package main
 
 import (
@@ -31,12 +31,9 @@ type panel struct {
 }
 
 // makePanel 按命令名与结果载荷造面板；造不出返回 nil，调用方退回文本输出。
-func makePanel(command string, data json.RawMessage, agentID int) *panel {
-	switch command {
-	case "model":
+func makePanel(command string, data json.RawMessage) *panel {
+	if command == "model" {
 		return modelPanel(data)
-	case "resume":
-		return sessionPanel(data, agentID)
 	}
 	return nil
 }
@@ -62,45 +59,26 @@ func modelPanel(data json.RawMessage) *panel {
 	return p
 }
 
-// sessionPanel 把 /resume 的会话清单做成选择面板：Enter = 恢复那个会话。
-// 清单已按最近写入倒序（core 侧排好），所以第一项就是"上一个会话"。
-func sessionPanel(data json.RawMessage, agentID int) *panel {
-	var list []client.SessionInfo
-	if err := json.Unmarshal(data, &list); err != nil || len(list) == 0 {
-		return nil
-	}
-	p := &panel{title: "恢复会话"}
-	for _, s := range list {
-		title := s.Title
-		if title == "" {
-			title = "（空会话）"
-		}
-		p.items = append(p.items, panelItem{
-			label:  fmt.Sprintf("%s  %s  %d 条", s.ID, title, s.Messages),
-			mark:   s.OpenedBy == agentID,
-			submit: "/resume " + s.ID,
-		})
-	}
-	p.sel = p.markIndex()
-	return p
-}
-
-// agentPanel 把 agent 清单做成选择面板：Enter = 切过去看它（ADR-0020）。
-func agentPanel(list []client.AgentInfo, cur int) *panel {
+// sessionPanel 把对话清单做成选择面板：Enter = 换到那段对话。
+// 清单已按最近写入倒序（core 侧排好），所以第一项就是"上一段对话"。
+func sessionPanel(list []client.SessionInfo, cur string) *panel {
 	if len(list) == 0 {
 		return nil
 	}
-	p := &panel{title: "切到哪个 agent"}
-	for _, a := range list {
-		label := fmt.Sprintf("%d  %s  %s", a.ID, a.State, a.Workdir)
-		if n := len(a.InEdges) + len(a.OutEdges); n > 0 {
-			label += fmt.Sprintf("  (入 %d 出 %d)", len(a.InEdges), len(a.OutEdges))
+	p := &panel{title: "换到哪段对话"}
+	for _, s := range list {
+		title := s.Title
+		if title == "" {
+			title = "（空对话）"
 		}
-		p.items = append(p.items, panelItem{
-			label:  label,
-			mark:   a.ID == cur,
-			submit: fmt.Sprintf("/agents %d", a.ID),
-		})
+		label := fmt.Sprintf("%s  %d 条", title, s.Messages)
+		switch s.State {
+		case "running":
+			label += "  · 正在跑"
+		case "elsewhere":
+			label += "  · 在别的窗口里开着"
+		}
+		p.items = append(p.items, panelItem{label: label, mark: s.ID == cur, submit: "/resume " + s.ID})
 	}
 	p.sel = p.markIndex()
 	return p
@@ -120,7 +98,6 @@ func (p *panel) markIndex() int {
 // 确认出来的（启停类操作改完接着操作，面板不该自己跑掉）。
 //
 //	/model      列清单 → 开面板选；/model <name> 是明确指令，选完即走
-//	/resume     列会话 → 开面板选
 //	/statusline 纯本地，列表与切换回的是同一份清单 → 面板里连续操作不用重打命令
 func panelWantOf(input string, fromPanel bool) string {
 	cmd, args := splitCommand(input)
@@ -128,10 +105,6 @@ func panelWantOf(input string, fromPanel bool) string {
 	case "/model":
 		if args == "" {
 			return "model"
-		}
-	case "/resume":
-		if args == "" {
-			return "resume"
 		}
 	case "/statusline":
 		if args == "" || fromPanel {

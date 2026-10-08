@@ -1,21 +1,19 @@
 // 与 core 的通信：网页直连，请求走 fetch，推送走 WebSocket（ADR-0028）。
 // 连谁、client_id、workdir 三样由 Go 侧（main.go）给。协议的唯一真相是 docs/PROTOCOL.md，下面的类型照它抄。
 
-export interface Agent {
-  id: number;
-  workdir: string;
-  state: string;
-  session_id?: string;
-  in_edges?: number[];
-  out_edges?: number[];
-}
-
+// 用户看见的只有对话（ADR-0029）。state：running = 正在跑，elsewhere = 在别的窗口里开着，空 = 都不是
 export interface Session {
   id: string;
   title: string;
   messages: number;
   mtime: number;
-  opened_by: number | null;
+  state: "running" | "elsewhere" | "";
+}
+
+// 每帧都盖着这个章：root 是哪段对话，session_id 是谁说的（不等于 root 就是它派生出去的子 agent）
+export interface Who {
+  root?: string;
+  session_id?: string;
 }
 
 export interface Command {
@@ -32,9 +30,8 @@ export interface Model {
   current?: boolean;
 }
 
-export interface Approval {
+export interface Approval extends Who {
   id: string;
-  agent_id: number;
   tool: string;
   params?: Record<string, unknown>;
 }
@@ -45,17 +42,17 @@ export interface Statusline {
   context?: number;
 }
 
-// POST /agent、/session、/command、/message 的回执
+// POST /command、/message 的回执
 export interface Reply<T = unknown> {
   ok?: boolean;
   error?: string;
+  status?: string;
   command?: string;
   data?: T;
-  agent_id?: number;
 }
 
 // 推送帧与 GET /session 回放同形（回放用 type 作键，推送用 event，读进来时统一成 event）
-type Of = { agent_id?: number };
+type Of = Who;
 export type Frame =
   | { event: "message_start"; data: Of & { role?: string; text?: string } }
   | { event: "message_update" | "thinking_update"; data: Of & { delta?: string } }

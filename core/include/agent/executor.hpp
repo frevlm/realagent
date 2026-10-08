@@ -42,7 +42,12 @@ class Executor {
     nlohmann::json execute(const std::string &call_id, const std::string &name,
                            const std::string &params_json);
 
-    void interrupt() { interrupted_ = true; }
+    /* 连同这个 agent 挂着的审批一起按 deny 掐掉：不然中断要干等 30 秒超时。 */
+    void interrupt()
+    {
+        interrupted_ = true;
+        approval_.cancel(agent_id_);
+    }
     void reset() { interrupted_ = false; }
 
   private:
