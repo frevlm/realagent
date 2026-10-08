@@ -1,6 +1,6 @@
 # 通信协议（core ↔ 客户端）
 
-> core（C++）与客户端（TUI/未来 gui）的通信契约：请求走 HTTP/1.1，推送走 WebSocket。
+> core（C++）与客户端（TUI / gui）的通信契约：请求走 HTTP/1.1，推送走 WebSocket。
 > 依据 ADR-0006（服务化）+ ADR-0007（TUI Go）+ ADR-0026（传输改回 TCP）。
 > **设计演进史见文末**——理解"为什么是全可靠流"必读。
 
@@ -20,6 +20,10 @@ TUI ◀──(2) WebSocket 推送────────────  core     
 ```
 
 core 只听 `127.0.0.1:12345`，不加密。将来上远程，TLS 放在前面的反向代理上（ADR-0026）。
+
+**按 `Origin` 放行**（HTTP 与 WebSocket 升级同一道）：不带 `Origin` 的客户端（TUI、curl）照常；
+gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时的 `wails://wails.localhost:34115`、`http://localhost:34115`）放行并回 CORS 头；其余 403。core 没有认证，
+不拦浏览器页面就等于让任何网站替用户跑 bash（ADR-0028）。
 
 ### (1) 请求-响应
 
@@ -44,6 +48,8 @@ core 只听 `127.0.0.1:12345`，不加密。将来上远程，TLS 放在前面�
 未匹配任何路由的请求返回 `404`。
 
 **参数一律走 JSON 体，GET 也不例外**（唯一例外是 `GET /events?client_id=`，理由见上）。
+浏览器发不出带体的 GET，所以 GET 的那份 JSON 也可以放进查询串 `?body=<JSON>`——还是同一份 JSON，
+请求体非空时以请求体为准（ADR-0028）。
 再养一套 query string 解析就是两处必须永远一致的参数格式，而这里一个查询参数都不缺。
 
 **每个动 agent 的端点都要 `client_id` 与 `agent_id`，都没有默认值**：`agent_id`
