@@ -47,6 +47,7 @@
   color-scheme: dark;
 }
 :root {
+  --brand-bg: linear-gradient(#2a8a72, #17594a); --brand-dot: #9be6cf; /* 与 build/appicon.svg 同色，不随主题变 */
   --shell-bg: #12100f; --shell-bar: #191816; --shell-rule: #282624; --shell-border: rgba(255, 248, 240, 0.08);
   --shell-text: #e0dddb; --shell-dim: #888683; --shell-prompt: #7ad59c;
   --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -126,8 +127,9 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
 
 .brand { display: inline-flex; align-items: center; gap: 0.55rem; color: var(--text); font-weight: 650; font-size: 16px; letter-spacing: -0.02em; }
 .brand:hover { color: var(--text); }
-.brand-mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: var(--radius); color: var(--bg); background: var(--text); }
-.brand-mark .icon { stroke-width: 2.5; }
+.brand-mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: var(--radius); color: #fff; background: var(--brand-bg); }
+.brand-mark .icon { width: 22px; height: 22px; stroke-width: 2.25; }
+.brand-mark .dot, .empty-mark .dot { fill: var(--brand-dot); stroke: none; }
 .theme-toggle {
   width: 32px; height: 32px; display: grid; place-items: center; padding: 0; cursor: pointer;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text-2);
@@ -271,8 +273,8 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
   position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 0.375rem; padding: 1.5rem 1.5rem 4rem; text-align: center; pointer-events: none;
 }
-.empty-mark { width: 44px; height: 44px; display: grid; place-items: center; margin-bottom: 0.875rem; border-radius: var(--radius-lg); color: var(--bg); background: var(--text); }
-.empty-mark .icon { width: 22px; height: 22px; stroke-width: 2.25; }
+.empty-mark { width: 44px; height: 44px; display: grid; place-items: center; margin-bottom: 0.875rem; border-radius: var(--radius-lg); color: #fff; background: var(--brand-bg); }
+.empty-mark .icon { width: 34px; height: 34px; stroke-width: 2.25; }
 .empty h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.03em; line-height: 1.2; text-wrap: balance; }
 .empty p { margin: 0; font-size: 14px; }
 .empty .mono { font-size: 13px; color: var(--text-2); }
