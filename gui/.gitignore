@@ -1,0 +1,9 @@
+/node_modules
+/dist
+/wailsjs
+/package.json.md5
+# 根目录忽略 build/；这里的 build/ 放 Wails 的图标与平台模板，只忽略产物
+!/build/
+/build/bin
+/build/darwin
+/build/windows

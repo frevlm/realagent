@@ -10,7 +10,7 @@ TUI       := $(BUILD_DIR)/realagent-tui
 $(NINJA):
 	cmake -S . -B $(BUILD_DIR) -G Ninja
 
-.PHONY: all core tui test run tui-run fmt fmt-check clean help
+.PHONY: all core tui gui dev dev-browser dev-app test run tui-run fmt fmt-check clean help
 
 all: core tui        ## 构建全部（core + TUI），默认目标
 
@@ -20,18 +20,34 @@ core: $(NINJA)       ## 构建 core（C++ WebSocket 服务）
 tui: $(NINJA)        ## 构建 TUI（Go + Bubble Tea）
 	cmake --build $(BUILD_DIR) --target realagent-tui
 
-# 用启动日志当就绪信号。
+# gui 不进 all：要 Node 与 Wails 两套工具链，只动 core / TUI 的人不该被它拖着
+WAILS := $(shell go env GOPATH)/bin/wails
+
+gui:                 ## 构建 gui（Wails：TS 网页 + Go 壳），产物在 gui/build/bin/
+	cd gui && $(WAILS) build
+
+# 后台起 core，前台跑 $(1)，它退出时收掉 core。用启动日志当就绪信号。
 # 注意：recipe 里不能写 shell 注释——续行会让注释吞掉整条命令。
-dev: all             ## 开发模式：后台起 core + 前台跑 TUI，TUI 退出时自动清理 core
+define with-core
 	@$(CORE) > $(BUILD_DIR)/core.log 2>&1 & \
 	core_pid=$$!; \
 	trap 'kill $$core_pid 2>/dev/null' INT TERM; \
 	for i in $$(seq 1 50); do grep -q "运行在 127.0.0.1" $(BUILD_DIR)/core.log 2>/dev/null && break; kill -0 $$core_pid 2>/dev/null || break; sleep 0.1; done; \
-	$(TUI); \
+	$(1); \
 	rc=$$?; \
 	kill $$core_pid 2>/dev/null; \
 	wait $$core_pid 2>/dev/null; \
 	exit $$rc
+endef
+
+dev: all             ## 开发：core + TUI
+	$(call with-core,$(TUI))
+
+dev-browser: core    ## 开发：core + gui 网页（浏览器开 localhost:34115，热重载）
+	$(call with-core,cd gui && REALAGENT_WORKDIR=$(CURDIR) $(WAILS) dev -browser)
+
+dev-app: core        ## 开发：core + gui 桌面窗口（热重载）
+	$(call with-core,cd gui && REALAGENT_WORKDIR=$(CURDIR) $(WAILS) dev)
 
 # 先构建全部目标（含测试可执行文件）再跑 ctest。只 configure 不构建的话，
 # 干净的 build 目录里根本没有测试二进制，ctest 会把四个用例全报 "Not Run"——

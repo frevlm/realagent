@@ -551,6 +551,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 
 - 项目定位：AI 编码 agent，第一阶段 core + tui（均 C++），gui 后续。
   - 实况注（2026-08-16）：**TUI 不是 C++，是 Go + Bubble Tea**（ADR-0007，见本节 TUI 条）。"均 C++"是 ADR-0007 之前的设想，未随之更新。core 是 C++。
+  - 实况注（2026-10-08）：**gui 已有，是 Wails 桌面应用**（`gui/`，ADR-0028）：网页层 TypeScript 直连 core，Go 侧只给地址、client_id 与 workdir。
 - 架构基调：极简核心，参考 Pi（earendil-works/pi）。
   - 实况注（2026-08-25）：**"+ 插件/扩展架构"已删**（[[ADR-0016]]）。极简核心这半句留着，而且更成立了——插件机制本身就是那个不极简的部分。
 - core 分层参考：ai（Provider 抽象）→ agent（Loop/状态/事件）→ tools（注册与执行）→ extension（扩展宿主）。

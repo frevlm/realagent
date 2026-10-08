@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>realagent</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f6f5c'/%3E%3Cpath d='M10 11l5 5-5 5M17 21h6' fill='none' stroke='%23fff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script>
+  // 首帧前定主题，避免闪烁。三态：跟随系统 → 浅色 → 深色
+  (function () {
+    var t = "system";
+    try { t = localStorage.getItem("theme") || "system"; } catch (e) {}
+    var dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  })();
+</script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <a class="brand" href="/">
+        <span class="brand-mark"><svg class="icon" viewBox="0 0 24 24"><path d="m6 8 4 4-4 4"/><path d="M13 16h5"/></svg></span>
+        realagent
+      </a>
+    </div>
+
+    <div class="side-section">
+      <div class="side-label">
+        <span>Agent</span>
+        <button class="btn btn-ghost btn-icon btn-sm" id="new-agent" title="新建 agent"><svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+      </div>
+      <nav class="agent-list" id="agent-list"></nav>
+    </div>
+
+    <div class="side-section side-grow">
+      <div class="side-label">
+        <span>会话</span>
+        <button class="btn btn-ghost btn-icon btn-sm" id="new-session" title="新会话"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M12 7v6"/><path d="M9 10h6"/></svg></button>
+      </div>
+      <nav class="session-list" id="session-list"></nav>
+    </div>
+
+    <div class="side-foot">
+      <span class="conn" id="conn"><span class="dot"></span><span id="conn-text">连接中</span></span>
+      <button class="theme-toggle" id="theme" title="主题"></button>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="btn btn-ghost btn-icon only-mobile" id="menu" title="菜单"><svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg></button>
+      <div class="top-title">
+        <span class="top-name" id="top-name">—</span>
+        <span class="top-dir mono" id="top-dir"><svg class="icon" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span id="top-dir-text"></span></span>
+      </div>
+      <div class="top-actions">
+        <span class="pill pill-accent" id="top-state" hidden><span class="dot"></span>运行中</span>
+        <div class="dropdown">
+          <button class="btn btn-secondary btn-sm" id="model-btn">
+            <span id="model-name" class="mono">—</span>
+            <svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="menu" id="model-menu" hidden></div>
+        </div>
+      </div>
+    </header>
+
+    <section class="thread-wrap" id="thread-wrap">
+      <div class="thread" id="thread"></div>
+      <div class="empty" id="empty" hidden>
+        <span class="empty-mark"><svg class="icon" viewBox="0 0 24 24"><path d="m6 8 4 4-4 4"/><path d="M13 16h5"/></svg></span>
+        <h1>有什么要做的？</h1>
+        <p class="text-3">消息发给 <span id="empty-agent"></span>，它在 <span class="mono" id="empty-dir"></span> 里工作。</p>
+      </div>
+    </section>
+
+    <footer class="dock">
+      <div class="dock-inner">
+        <div id="approvals"></div>
+        <div class="status" id="status" hidden>
+          <svg class="icon spin" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+          <span id="status-text"></span>
+        </div>
+        <div class="composer">
+          <div class="menu slash" id="slash" hidden></div>
+          <textarea id="input" rows="1" placeholder="给 agent 发消息"></textarea>
+          <button class="btn btn-primary btn-icon" id="send" title="发送" disabled><svg class="icon" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
+          <button class="btn btn-dark btn-icon" id="stop" title="中断（Esc）" hidden><svg class="icon" viewBox="0 0 24 24"><rect width="10" height="10" x="7" y="7" rx="1.5" fill="currentColor" stroke="none"/></svg></button>
+        </div>
+        <div class="caption"><b>Enter</b> 发送 · <b>Shift Enter</b> 换行 · <b>/</b> 命令 · <b>Esc</b> 中断</div>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<div class="modal-back" id="modal" hidden>
+  <form class="modal" id="agent-form">
+    <h2 class="modal-title">新建 agent</h2>
+    <p class="text-3 small">agent 在这个目录里读写文件、跑命令。</p>
+    <div class="field">
+      <label class="form-label" for="agent-dir">工作目录</label>
+      <input class="form-control mono" id="agent-dir" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" id="agent-cancel">取消</button>
+      <button type="submit" class="btn btn-primary">创建</button>
+    </div>
+  </form>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
