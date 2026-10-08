@@ -85,7 +85,7 @@ export function setup(cfg: Settings): Promise<void> {
       const [k, title, hint] = STEPS[step];
       const last = k === "small_model";
       root.innerHTML = `
-        <a class="brand"><span class="brand-mark">${ic("terminal")}</span>realagent</a>
+        <a class="brand"><span class="brand-mark">${ic("brand")}</span>realagent</a>
         <div class="setup-card">
           <div class="setup-steps">${STEPS.map((_, i) => `<span class="${i <= step ? "on" : ""}"></span>`).join("")}</div>
           <div class="setup-head"><h2>${title}</h2><span class="mono">${k} · ${step + 1}/${STEPS.length}</span></div>
