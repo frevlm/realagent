@@ -703,7 +703,17 @@ document.addEventListener("click", (e) => {
   }
 });
 
+// 设置 = 重走引导，现值预填。⌘,（macOS）/ Ctrl+,（其余）与系统菜单都进这里；引导页开着时不再开一遍
+const MAC = /Mac/.test(navigator.userAgent);
+async function openSettings() {
+  if (!$("setup").hidden) return;
+  await setup(await core.call<Settings>("GET", "/setup"));
+  setModel((await call<Statusline>("GET", "/statusline")).model);
+}
+
 document.addEventListener("keydown", (e) => {
+  const mod = MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (mod && !e.shiftKey && !e.altKey && e.key === ",") return void (e.preventDefault(), openSettings());
   if (e.key !== "Escape") return;
   if (!$("model-menu").hidden) return void ($("model-menu").hidden = true);
   if (slashMatches().length) { S.slashHidden = true; return renderSlash(); }
@@ -729,6 +739,7 @@ function onConn(ok: boolean) {
   // 首启引导（setup.ts）：settings.json 里 setup_done 不为 true 就先走一遍
   const cfg = await core.call<Settings>("GET", "/setup");
   if ((await core.setupForced()) || !cfg.setup_done) await setup(cfg);
+  core.onMenu("settings", openSettings);
   S.workdir = await core.workdir();
   await core.subscribe(handle, onConn);
   setModel((await call<Statusline>("GET", "/statusline")).model);

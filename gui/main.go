@@ -1,5 +1,5 @@
 // realagent gui 的原生侧：开窗口，告诉网页连谁、自己是谁、用户站在哪（ADR-0028）。
-// 与 core 的通信在网页里直连，这里只在退出时替它关组。
+// 与 core 的通信在网页里直连，这里只在退出时替它关组；macOS 上再挂一个系统菜单。
 package main
 
 import (
@@ -11,12 +11,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/menu"
+	"github.com/wailsapp/wails/v2/pkg/menu/keys"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 //go:embed all:dist
@@ -31,9 +35,29 @@ type Env struct {
 }
 
 // App 绑定给网页：window.go.main.App
-type App struct{ env Env }
+type App struct {
+	env Env
+	ctx context.Context
+}
 
 func (a *App) Env() Env { return a.env }
+
+func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+
+// macOS 的设置在应用菜单里（⌘,），点了发 "settings" 给网页。给了 Menu，Wails 就不再塞默认的编辑、窗口菜单，
+// 得自己带上：⌘C ⌘V 靠编辑菜单才进得了 WebView。Windows / Linux 的菜单是窗口里一条横栏，不要，Ctrl+, 归网页
+func (a *App) menu() *menu.Menu {
+	if goruntime.GOOS != "darwin" {
+		return nil
+	}
+	m := menu.NewMenu()
+	app := m.AddSubmenu("realagent")
+	app.AddText("设置…", keys.CmdOrCtrl(","), func(*menu.CallbackData) { runtime.EventsEmit(a.ctx, "settings") })
+	app.AddText("退出 realagent", keys.CmdOrCtrl("q"), func(*menu.CallbackData) { runtime.Quit(a.ctx) })
+	m.Append(menu.EditMenu())
+	m.Append(menu.WindowMenu())
+	return m
+}
 
 // 正常退出前关组；断线 60 秒 core 自己也会关，那是兜底（ADR-0021）
 func (a *App) closeGroup(context.Context) {
@@ -67,7 +91,7 @@ func main() {
 	}
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	app := &App{Env{Core: core, ClientID: hex.EncodeToString(b[:]), Workdir: workdir(), Setup: os.Getenv("REALAGENT_SETUP") != ""}}
+	app := &App{env: Env{Core: core, ClientID: hex.EncodeToString(b[:]), Workdir: workdir(), Setup: os.Getenv("REALAGENT_SETUP") != ""}}
 
 	err := wails.Run(&options.App{
 		Title:       "realagent",
@@ -76,7 +100,9 @@ func main() {
 		MinWidth:    380,
 		MinHeight:   480,
 		AssetServer: &assetserver.Options{Assets: assets},
+		Menu:        app.menu(),
 		Bind:        []any{app},
+		OnStartup:   app.startup,
 		OnShutdown:  app.closeGroup,
 	})
 	if err != nil {

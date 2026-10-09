@@ -83,7 +83,7 @@ interface Env {
 declare global {
   interface Window {
     go: { main: { App: { Env(): Promise<Env> } } };
-    runtime: { BrowserOpenURL(url: string): void };
+    runtime: { BrowserOpenURL(url: string): void; EventsOn(name: string, fn: () => void): () => void };
   }
 }
 
@@ -105,6 +105,9 @@ export const workdir = async () => (await env).workdir;
 export const setupForced = async () => (await env).setup;
 
 export const openUrl = (url: string) => window.runtime.BrowserOpenURL(url);
+
+// 系统菜单点了哪一项（main.go 的 menu()）
+export const onMenu = (name: string, fn: () => void) => window.runtime.EventsOn(name, fn);
 
 // 推送流只开一条，断了 1.5 秒后重连
 export async function subscribe(onFrame: (f: Frame) => void, onConn: (ok: boolean) => void) {
