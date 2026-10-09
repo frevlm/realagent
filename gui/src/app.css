@@ -127,6 +127,7 @@ code, kbd, pre, .mono { font-family: var(--font-mono); }
 
 .brand { display: inline-flex; align-items: center; gap: 0.55rem; color: var(--text); font-weight: 650; font-size: 16px; letter-spacing: -0.02em; }
 .brand:hover { color: var(--text); }
+.side-head .brand { cursor: pointer; }
 .brand-mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: var(--radius); color: #fff; background: var(--brand-bg); }
 .brand-mark .icon { width: 22px; height: 22px; stroke-width: 2.25; }
 .brand-mark .dot, .empty-mark .dot { fill: var(--brand-dot); stroke: none; }

@@ -681,6 +681,7 @@ function closeSidebar() {
 $("menu").onclick = () => { $("sidebar").classList.add("open"); $("scrim").classList.add("open"); };
 $("scrim").onclick = closeSidebar;
 $("new-session").onclick = newConversation;
+q(document, ".side-head .brand").onclick = newConversation;
 $("send").onclick = submit;
 $("stop").onclick = interrupt;
 $("model-btn").onclick = openModelMenu;
