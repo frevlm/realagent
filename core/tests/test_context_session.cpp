@@ -107,19 +107,46 @@ static json dialog3(const std::string &system, bool with_tools)
 
 /* —— 与服务端同一套共享模块的独立复算 —— */
 
-/* 完整请求体文本 → 拼装体（剥 revlm_context / cache_control → blobs → assemble） */
+/* 完整请求体文本 → 拼装体（剥 revlm_context / cache_control → blobs → assemble）。
+ * move_shape_to_end = 增量轮的键序规则：system/tools 挪到对象末尾再拼装，
+ * 与服务端按 shape 注入的追加位置一致（P3）。 */
 static std::string assemble_full(const std::string &body_text,
                                  std::vector<rllm::RequestMark> *marks_out = nullptr,
-                                 std::vector<std::string> *blobs_out = nullptr)
+                                 std::vector<std::string> *blobs_out = nullptr,
+                                 bool move_shape_to_end = false)
 {
     boost::json::value request = boost::json::parse(body_text);
-    request.as_object().erase("revlm_context");
+    boost::json::object &ro = request.as_object();
+    ro.erase("revlm_context");
     std::vector<rllm::RequestMark> marks;
     for (const rllm::CacheMark &m : rllm::strip_cache_control(request))
         marks.push_back({m.path, m.value});
     std::vector<std::string> blobs;
-    for (const auto &m : request.as_object().at("messages").as_array())
+    for (const auto &m : ro.at("messages").as_array())
         blobs.push_back(rllm::canonical_message(m));
+    if (move_shape_to_end)
+    {
+        // 重建实现，与客户端同一规则；erase 后 operator[] 是否在末尾是实现细节
+        boost::json::object rebuilt;
+        std::optional<boost::json::value> system, tools;
+        for (const auto &kv : ro)
+        {
+            if (kv.key() == "system")
+            {
+                system = kv.value();
+                continue;
+            }
+            if (kv.key() == "tools")
+            {
+                tools = kv.value();
+                continue;
+            }
+            rebuilt.emplace(kv.key(), kv.value());
+        }
+        if (system) rebuilt.emplace("system", std::move(*system));
+        if (tools) rebuilt.emplace("tools", std::move(*tools));
+        request = boost::json::value(std::move(rebuilt));
+    }
     if (marks_out) *marks_out = marks;
     if (blobs_out) *blobs_out = blobs;
     return rllm::assemble_request_body(request, blobs, marks);
@@ -177,6 +204,8 @@ static void test_full_then_incremental()
     const std::string wire2 = cs.wrap_request(r2);
     const json w2 = json::parse(wire2);
     CHECK(w2["messages"].size() == 1, "增量 messages 只带尾部");
+    CHECK(!w2.contains("system") && !w2.contains("tools"),
+          "P3：增量体省略 system/tools（shape 引用，服务端取回注入）");
     CHECK(w2["messages"][0]["role"] == "user" &&
               w2["messages"][0]["content"][0]["text"] == "second",
           "尾部是第 k+1 条起的新消息");
@@ -192,7 +221,7 @@ static void test_full_then_incremental()
 
     /* expect 与 shape：对完整请求的独立拼装 */
     std::vector<std::string> blobs2;
-    const std::string full2 = assemble_full(r2, nullptr, &blobs2);
+    const std::string full2 = assemble_full(r2, nullptr, &blobs2, /*move_shape_to_end=*/true);
     CHECK(ctx2["expect"] == rllm::sha256_hex(full2),
           "expect = 完整拼装体的 SHA-256（不是增量体的）");
     boost::json::value R2 = boost::json::parse(r2);
@@ -201,10 +230,17 @@ static void test_full_then_incremental()
                                             R2.as_object().at("tools"))),
           "shape = system+tools 的哈希");
 
-    /* 反拼（服务端视角）：增量体 + 已知 blobs + 随体 marks → 完整请求体 */
+    /* 反拼（服务端视角）：增量体 + 已知 blobs + 随体 marks + 按 shape 注入的
+     * system/tools → 完整请求体 */
     boost::json::value W = boost::json::parse(wire2);
     const boost::json::object cx = W.as_object().at("revlm_context").as_object();
     W.as_object().erase("revlm_context");
+    boost::json::value sys = R2.as_object().at("system");
+    boost::json::value tls = R2.as_object().at("tools");
+    rllm::strip_cache_control(sys); // shape 存的是剥过 cache_control 的那份
+    rllm::strip_cache_control(tls);
+    W.as_object()["system"] = std::move(sys);
+    W.as_object()["tools"] = std::move(tls);
     std::vector<std::string> known{blobs2[0],
                                    rllm::canonical_message(protocol_assistant(kAssistant1))};
     for (auto &m : W.as_object().at("messages").as_array())
@@ -270,6 +306,7 @@ static void test_marks_roundtrip()
     W.as_object().erase("revlm_context");
     boost::json::value head = boost::json::parse(short_body.dump());
     rllm::strip_cache_control(head);
+    W.as_object()["system"] = head.as_object().at("system"); // 服务端按 shape 注入（剥过的）
     std::vector<std::string> known;
     for (const auto &m : head.as_object().at("messages").as_array())
         known.push_back(rllm::canonical_message(m));
@@ -277,8 +314,8 @@ static void test_marks_roundtrip()
         known.push_back(rllm::canonical_message(m));
     const std::string reassembled =
         rllm::assemble_request_body(W, known, marks_from_json(cx.at("cache_control")));
-    CHECK(reassembled == assemble_full(long_body.dump()),
-          "断点插回后的反拼 == 完整拼装（cache_control 位置也一致）");
+    CHECK(reassembled == assemble_full(long_body.dump(), nullptr, nullptr, true),
+          "断点插回后的反拼 == 完整拼装（cache_control 位置也一致，P3 键序）");
 }
 
 /* —— 单元：历史对不上 / shape 变了 → 完整请求 —— */

@@ -4,8 +4,9 @@
  * 发送体的构造规则（与服务端同一套）：
  *   完整请求对象 → 剥 revlm_context → strip_cache_control 记 marks → 逐条 canonical
  *   得 blobs；完整拼装体 = assemble_request_body(request, blobs, marks)，expect 是
- *   它的 SHA-256。增量体 = 同一请求对象、messages 换尾部、revlm_context 填
- *   prefix/count/shape/cache_control（marks 全量，路径按完整请求计）/expect。
+ *   它的 SHA-256。增量体 = 同一请求对象、messages 换尾部、system/tools 省掉
+ *   （服务端按 shape 取回注入）、revlm_context 填 prefix/count/shape/cache_control
+ *   （marks 全量，路径按完整请求计）/expect。
  */
 #include "llm/context_session.hpp"
 
@@ -55,6 +56,35 @@ boost::json::value member_or_null(const boost::json::object &o, const char *key)
     return it == o.end() ? boost::json::value{} : it->value();
 }
 
+/* P3 键序规则：把 system/tools 移到对象末尾。用重建实现——erase 之后 operator[]
+ * 是否真的追加在末尾是 boost 的实现细节，重建的顺序语义才是契约。 */
+boost::json::value shape_fields_at_end(boost::json::value request)
+{
+    boost::json::object rebuilt;
+    std::optional<boost::json::value> system, tools;
+    bool touched = false;
+    for (const auto &kv : request.as_object())
+    {
+        if (kv.key() == "system")
+        {
+            system = kv.value();
+            touched = true;
+            continue;
+        }
+        if (kv.key() == "tools")
+        {
+            tools = kv.value();
+            touched = true;
+            continue;
+        }
+        rebuilt.emplace(kv.key(), kv.value());
+    }
+    if (!touched) return request;
+    if (system) rebuilt.emplace("system", std::move(*system));
+    if (tools) rebuilt.emplace("tools", std::move(*tools));
+    return boost::json::value(std::move(rebuilt));
+}
+
 } // namespace
 
 std::string ContextSession::wrap_request(const std::string &full_request_body)
@@ -88,10 +118,6 @@ std::string ContextSession::wrap_throws(const std::string &full_request_body)
     std::vector<std::string> blobs;
     blobs.reserve(msgs.size());
     for (const auto &m : msgs) blobs.push_back(rllm::canonical_message(m));
-
-    // 完整拼装体与 expect：两端各自动手、必须逐字节相同，所以都走共享模块
-    const std::string full_assembled = rllm::assemble_request_body(request, blobs, marks);
-    const std::string expect = rllm::sha256_hex(full_assembled);
     const std::string shape =
         rllm::to_hex(rllm::shape_hash(member_or_null(ro, "system"), member_or_null(ro, "tools")));
 
@@ -110,13 +136,23 @@ std::string ContextSession::wrap_throws(const std::string &full_request_body)
     }
     shape_hex_ = shape;
 
-    // 尾部消息先摘出来：object 插入新键会让成员搬家，msgs 这个引用不能跨过
-    // 下面的改动再接着用。
+    // 尾部消息先摘出来：下面的键增删会让成员搬家，msgs 这个引用不能跨过改动再用。
     boost::json::array tail;
     for (std::size_t i = common; i < msgs.size(); ++i) tail.push_back(msgs[i]);
 
+    // P3 键序规则：增量轮两侧都把 system/tools 挪到对象末尾再拼装——服务端按
+    // shape 注入必然在末尾，客户端也规范化后，拼装字节就不再依赖原本的序列化
+    // 顺序（否则 tool_choice 夹在 system 与 tools 之间这类键序必炸 expect）。
+    // 重建后 request 换了存储，旧引用（ro/msgs）从此作废。
+    if (prefix_ok)
+        request = shape_fields_at_end(std::move(request));
+
+    // 完整拼装体与 expect：两端各自动手、必须逐字节相同，所以都走共享模块
+    const std::string full_assembled = rllm::assemble_request_body(request, blobs, marks);
+    const std::string expect = rllm::sha256_hex(full_assembled);
+
     // 完整发送体：同一请求对象 + revlm_context:{}
-    ro["revlm_context"] = boost::json::object{};
+    request.as_object()["revlm_context"] = boost::json::object{};
     full_wire_ = boost::json::serialize(request);
     if (!prefix_ok)
     {
@@ -125,16 +161,20 @@ std::string ContextSession::wrap_throws(const std::string &full_request_body)
         return full_wire_;
     }
 
-    // 增量发送体：messages 换尾部，revlm_context 填协议字段；marks 的路径本来就是
-    // 按完整请求计的。expect 仍是对完整拼装体的哈希。
+    // 增量发送体：messages 换尾部，system/tools 省掉（服务端按 shape 取回注入），
+    // revlm_context 填协议字段；marks 的路径本来就是按完整请求计的。
+    // expect 仍是对完整拼装体的哈希——两侧注入同一份值，拼出的字节不变。
     boost::json::object ctx;
     ctx["prefix"] = rllm::to_hex(nodes_[common]);
     ctx["count"] = static_cast<std::uint64_t>(common);
     ctx["shape"] = shape_hex_;
     ctx["cache_control"] = marks_to_json(marks);
     ctx["expect"] = expect;
-    ro["revlm_context"] = std::move(ctx);
-    ro["messages"] = std::move(tail);
+    boost::json::object &ro2 = request.as_object();
+    ro2["revlm_context"] = std::move(ctx);
+    ro2["messages"] = std::move(tail);
+    ro2.erase("system");
+    ro2.erase("tools");
     inc_wire_ = boost::json::serialize(request);
     pending_save_ = static_cast<long long>(full_wire_.size()) - static_cast<long long>(inc_wire_.size());
     stats_.incrementals++;
