@@ -4,6 +4,7 @@
 
 #include <curl/curl.h>
 
+#include <cctype>
 #include <cstdio>
 
 namespace realagent {
@@ -149,7 +150,8 @@ struct StreamCtx {
     bool silent;
     bool parse_failed = false;
     long status = 0;
-    std::string error_body; // 非 2xx 时的响应体
+    std::string error_body;   // 非 2xx 时的响应体
+    std::string revlm_header; // X-Revlm-Context（增量上下文协议，可空）
 };
 
 int curl_progress_cb(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
@@ -174,6 +176,21 @@ size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
     if (ok) return n;
     s->parse_failed = true;
     return 0; // 返回 < n 让 curl 中止传输
+}
+
+/* 响应头里只捞 X-Revlm-Context（头名大小写不敏感）。 */
+size_t curl_header_cb(char *buf, size_t size, size_t nmemb, void *userdata)
+{
+    std::string_view line(buf, size * nmemb);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.remove_suffix(1);
+    const std::string_view name = "x-revlm-context:";
+    if (line.size() <= name.size()) return size * nmemb;
+    for (std::size_t i = 0; i < name.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(line[i])) != name[i]) return size * nmemb;
+    std::string_view value = line.substr(name.size());
+    while (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+    static_cast<StreamCtx *>(userdata)->revlm_header = std::string(value);
+    return size * nmemb;
 }
 
 } // namespace
@@ -204,7 +221,7 @@ void Agent::on_llm_event(std::string_view type, const json &ev, LlmOutcome &out,
     if (!silent && type != "tool_use" && type != "stop") broadcast(std::string(type), ev);
 }
 
-bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent)
+bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSession *context)
 {
     const auto fail = [&out](std::string why) {
         out.error = std::move(why);
@@ -214,37 +231,60 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent)
     // 别的入口（send_message、完成通知）也会走到这里，所以每次都查
     if (std::string e = endpoint_config_error(*ctx_.config); !e.empty()) return fail(std::move(e));
 
-    const HttpRequest req = build_request(*ctx_.config, dialog);
+    HttpRequest req = build_request(*ctx_.config, dialog);
     if (!req.url.starts_with("http")) return fail("base_url 不像个 URL（当前请求 URL: " + req.url + "）");
 
-    CURL *curl = curl_easy_init();
-    if (!curl) return fail("curl 初始化失败");
-    StreamCtx s{.self = this,
-                .curl = curl,
-                .parser = SseParser(*protocol_from(ctx_.config->get("protocol"))),
-                .out = &out,
-                .model = dialog.value("model", std::string()),
-                .silent = silent};
-    curl_slist *hdrs = nullptr;
-    for (const auto &h : req.headers) hdrs = curl_slist_append(hdrs, h.c_str());
-    curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort_);
-    const CURLcode rc = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    curl_slist_free_all(hdrs);
+    // 增量上下文协议：ContextSession 只管协议与状态（换发送体、409 重发、记统计），
+    // 传输还是这条 curl。
+    ContextSession *const cs = context;
+    if (cs) req.body = cs->wrap_request(req.body);
 
-    // 真因优先：HTTP 状态 > 解析失败（它引起的 WRITE_ERROR 不是真因）> 传输错误
-    if (std::string e = http_status_error(s.status, s.error_body); !e.empty()) return fail(std::move(e));
-    if (s.parse_failed) return fail("解析响应失败（见 core 日志）");
-    if (rc != CURLE_OK) return fail(std::string("curl 失败: ") + curl_easy_strerror(rc));
-    return true;
+    bool resent = false; // 409 只重发一次；连完整请求都 409 的服务端是真有错
+    for (;;)
+    {
+        CURL *curl = curl_easy_init();
+        if (!curl) return fail("curl 初始化失败");
+        StreamCtx s{.self = this,
+                    .curl = curl,
+                    .parser = SseParser(*protocol_from(ctx_.config->get("protocol"))),
+                    .out = &out,
+                    .model = dialog.value("model", std::string()),
+                    .silent = silent};
+        curl_slist *hdrs = nullptr;
+        for (const auto &h : req.headers) hdrs = curl_slist_append(hdrs, h.c_str());
+        curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
+        if (cs)
+        {
+            curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
+            curl_easy_setopt(curl, CURLOPT_HEADERDATA, &s);
+        }
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort_);
+        const CURLcode rc = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(hdrs);
+
+        // 409 revlm_context_miss / mismatch：上游还没被调、不计费，立即重发完整请求
+        if (cs && !resent && ContextSession::is_conflict(s.status, s.error_body))
+        {
+            req.body = cs->resend_full();
+            resent = true;
+            continue;
+        }
+        // 真因优先：HTTP 状态 > 解析失败（它引起的 WRITE_ERROR 不是真因）> 传输错误
+        if (std::string e = http_status_error(s.status, s.error_body); !e.empty())
+            return fail(std::move(e));
+        if (s.parse_failed) return fail("解析响应失败（见 core 日志）");
+        if (rc != CURLE_OK) return fail(std::string("curl 失败: ") + curl_easy_strerror(rc));
+        if (cs) cs->on_response(s.revlm_header);
+        return true;
+    }
 }
 
 std::string Agent::system_prompt() const
@@ -372,6 +412,9 @@ void Agent::record_assistant(const LlmOutcome &out)
                                {"name", tu.name},
                                {"input", in.is_discarded() ? json::object() : in}});
     }
+    // 增量上下文协议：assistant 消息接上链（node(n+1)，下一轮 prefix 用它）
+    if (context_protocol_enabled(*ctx_.config))
+        context_session_.record_assistant(json{{"role", "assistant"}, {"content", content}});
     record(json{{"role", "assistant"}, {"content", std::move(content)}});
 }
 
@@ -450,7 +493,10 @@ void Agent::loop()
 
         broadcast("turn_start", json::object());
         LlmOutcome out;
-        if (!llm_call(build_dialog(ModelTier::Main), out))
+        // 主对话走增量上下文协议（配置开了才有会话）；judge() 那次调用不传
+        ContextSession *const cs =
+            context_protocol_enabled(*ctx_.config) ? &context_session_ : nullptr;
+        if (!llm_call(build_dialog(ModelTier::Main), out, /*silent=*/false, cs))
         {
             if (!abort_.load())
             {

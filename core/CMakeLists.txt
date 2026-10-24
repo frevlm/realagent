@@ -60,6 +60,7 @@ add_library(realagent_core_lib STATIC
   src/plugin.cpp
   src/proc.cpp
   src/llm/llm.cpp
+  src/llm/context_session.cpp
   src/llm/upstream/anthropic_messages.cpp
   src/llm/upstream/openai_chat.cpp
   src/llm/upstream/openai_responses.cpp

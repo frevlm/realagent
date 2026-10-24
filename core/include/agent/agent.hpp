@@ -23,6 +23,7 @@
 #include "agent/session.hpp"
 #include "agent/verdict.hpp"
 #include "json.hpp"
+#include "llm/context_session.hpp"
 #include "llm/llm.hpp"
 #include "mcp/mcp.hpp"
 
@@ -87,6 +88,9 @@ class Agent {
     /* 内存里留着几条历史；idle 时是 0。 */
     size_t resident() const { return messages_.size(); }
 
+    /* 增量上下文协议的会话（含命中/未命中与省字节统计）。协议没开就是空转的账本。 */
+    const ContextSession &context_session() const { return context_session_; }
+
     /* SseParser 产出的事件落到这里（public 只因 curl 回调是自由函数）。
      * silent：正文不推给客户端（收工判定那次），花费照报。 */
     void on_llm_event(std::string_view type, const nlohmann::json &ev, LlmOutcome &out,
@@ -109,7 +113,10 @@ class Agent {
     void ensure_loaded();
 
     nlohmann::json build_dialog(ModelTier tier) const;
-    bool llm_call(const nlohmann::json &dialog, LlmOutcome &out, bool silent = false);
+    /* context 非空时这次调用走增量上下文协议（收工判定那次调用不传：每次判定都是
+     * 一段单条消息的新对话，接不上任何链）。 */
+    bool llm_call(const nlohmann::json &dialog, LlmOutcome &out, bool silent = false,
+                  ContextSession *context = nullptr);
     std::string last_text() const;
     void broadcast(const std::string &type, const nlohmann::json &payload);
 
@@ -132,6 +139,7 @@ class Agent {
     bool loaded_;
     std::string session_context_; // SessionStart hook 注入的文字
     std::string def_body_;
+    ContextSession context_session_; // 增量上下文协议的状态（配置开关控制用不用）
 
     size_t run_begin_ = 0; // 这一趟开跑时历史的长度：收工判定的抄本从这里取
     std::string recap_;    // 裁判写的 recap；没有裁判时为空

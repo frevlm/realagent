@@ -143,6 +143,14 @@ HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog)
     return {};
 }
 
+bool context_protocol_enabled(const Config &cfg)
+{
+    // 开关默认关；且协议只有 anthropic-messages 这一套
+    const nlohmann::json flag = cfg.get_json("revlm_context");
+    return flag.is_boolean() && flag.get<bool>() &&
+           protocol_from(cfg.get("protocol")) == Protocol::AnthropicMessages;
+}
+
 /* ==================== 下行：切块 + 派发 ==================== */
 
 SseBlock split_sse_block(std::string_view block)

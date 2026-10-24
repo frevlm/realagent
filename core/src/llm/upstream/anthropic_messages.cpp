@@ -46,6 +46,47 @@ nlohmann::json to_tool_content(const nlohmann::json &content)
 
 } // namespace
 
+/* 抽象消息 → /v1/messages 的 content 块。build_request 与 ContextSession 共用：
+ * assistant 消息进哈希链的字节必须与下一轮请求里的完全一致，转换只能有一份。 */
+nlohmann::json anthropic_content_blocks(const nlohmann::json &m)
+{
+    nlohmann::json blocks = nlohmann::json::array();
+    if (!m.contains("content") || !m["content"].is_array()) return blocks;
+    for (const nlohmann::json &b : m["content"])
+    {
+        const std::string bt = b.at("type");
+        nlohmann::json out_block = nlohmann::json::object();
+        if (bt == "text")
+        {
+            out_block["type"] = "text";
+            out_block["text"] = b.at("text");
+        }
+        else if (bt == "tool_use")
+        {
+            out_block["type"] = "tool_use";
+            out_block["id"] = b.at("id");
+            out_block["name"] = b.at("name");
+            out_block["input"] = b.value("input", nlohmann::json::object());
+        }
+        else if (bt == "tool_result")
+        {
+            out_block["type"] = "tool_result";
+            out_block["tool_use_id"] = b.at("tool_use_id");
+            out_block["content"] = to_tool_content(b.at("content"));
+            if (b.value("is_error", false)) out_block["is_error"] = true;
+        }
+        else if (bt == "thinking")
+        {
+            // thinking 块（协议固有内容）原样回传，带 signature（缺失时省略）
+            out_block["type"] = "thinking";
+            out_block["thinking"] = b.at("thinking");
+            if (b.contains("signature")) out_block["signature"] = b.at("signature");
+        }
+        blocks.push_back(out_block);
+    }
+    return blocks;
+}
+
 HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const nlohmann::json &dialog)
 {
     const nlohmann::json &d = dialog;
@@ -64,47 +105,12 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const 
         for (const nlohmann::json &m : d["messages"])
         {
             const std::string role = m.at("role");
-            nlohmann::json blocks = nlohmann::json::array();
-            if (m.contains("content") && m["content"].is_array())
-            {
-                for (const nlohmann::json &b : m["content"])
-                {
-                    const std::string bt = b.at("type");
-                    nlohmann::json out_block = nlohmann::json::object();
-                    if (bt == "text")
-                    {
-                        out_block["type"] = "text";
-                        out_block["text"] = b.at("text");
-                    }
-                    else if (bt == "tool_use")
-                    {
-                        out_block["type"] = "tool_use";
-                        out_block["id"] = b.at("id");
-                        out_block["name"] = b.at("name");
-                        out_block["input"] = b.value("input", nlohmann::json::object());
-                    }
-                    else if (bt == "tool_result")
-                    {
-                        out_block["type"] = "tool_result";
-                        out_block["tool_use_id"] = b.at("tool_use_id");
-                        out_block["content"] = to_tool_content(b.at("content"));
-                        if (b.value("is_error", false)) out_block["is_error"] = true;
-                    }
-                    else if (bt == "thinking")
-                    {
-                        // thinking 块（协议固有内容）原样回传，带 signature（缺失时省略）
-                        out_block["type"] = "thinking";
-                        out_block["thinking"] = b.at("thinking");
-                        if (b.contains("signature")) out_block["signature"] = b.at("signature");
-                    }
-                    blocks.push_back(out_block);
-                }
-            }
+            const nlohmann::json blocks = anthropic_content_blocks(m);
             // 合并相邻同 role：若上一条 message 同 role，并入其 content
             if (!msgs.empty() && msgs.back()["role"] == role)
             {
                 nlohmann::json &last_blocks = msgs.back()["content"];
-                for (nlohmann::json &blk : blocks) last_blocks.push_back(blk);
+                for (const nlohmann::json &blk : blocks) last_blocks.push_back(blk);
             }
             else
             {
