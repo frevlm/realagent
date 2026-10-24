@@ -31,6 +31,30 @@ FetchContent_MakeAvailable(httplib)
 # 普通 -I，排在每个 -isystem 之前：Homebrew 在 /opt/homebrew/include 装着另一个版本的 httplib.h，不许它先被找到
 set_property(TARGET httplib PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "")
 
+# revlm 共享模块（增量上下文协议的 canonical/哈希链，realurl/llm；两端必须同一份实现，
+# 见 revlm docs/context-cache.md）。只取 realurl 子树——revlm 的 backend 连着 sqlpp11
+# 一整套数据库依赖，core 用不到也不背。
+#   本地开发：cmake -DREALAGENT_REVLM_SOURCE_DIR=/path/to/revlm
+#   不给：FetchContent GitHub 上的 revlm
+set(REALAGENT_REVLM_SOURCE_DIR "" CACHE PATH "本地 revlm checkout（空 = FetchContent GitHub 仓库）")
+set(REVLM_BUILD_BACKEND OFF CACHE BOOL "" FORCE)
+set(REVLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(REALURL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(REALURL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(REALURL_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+if(REALAGENT_REVLM_SOURCE_DIR)
+  add_subdirectory(${REALAGENT_REVLM_SOURCE_DIR}/realurl ${CMAKE_CURRENT_BINARY_DIR}/revlm-realurl)
+else()
+  FetchContent_Declare(revlm
+    GIT_REPOSITORY https://github.com/frevlm/revlm.git
+    # TODO: 等 revlm 推 tag 后钉一个版本号（context_canonical 合入之后）；定版前
+    # 远程路径没有这个模块、编不过，本地开发一律走 REALAGENT_REVLM_SOURCE_DIR。
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR realurl)
+  FetchContent_MakeAvailable(revlm)
+endif()
+
 add_library(realagent_core_lib STATIC
   src/config.cpp
   src/plugin.cpp
@@ -63,6 +87,8 @@ add_library(realagent_core_lib STATIC
 )
 target_include_directories(realagent_core_lib PUBLIC include)
 target_link_libraries(realagent_core_lib PRIVATE ${CURL_LIBRARIES})
+# PUBLIC：context_session.hpp 把 realurl 的头暴露了出去，测试链 core 库时要找得到
+target_link_libraries(realagent_core_lib PUBLIC realurl::llm)
 
 add_executable(realagent-core
   src/main.cpp
