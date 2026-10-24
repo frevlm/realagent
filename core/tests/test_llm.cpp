@@ -101,6 +101,8 @@ static Collected run_parse(const std::vector<std::string> &chunks,
             c.stop_reason = ev["reason"];
         else if (t == "thinking_start")
             c.thinking_sig = ev["signature"];
+        else if (t == "thinking_signature")
+            c.thinking_sig = ev["signature"];
         else if (t == "thinking_update")
             c.thinking += ev["delta"].get<std::string>();
         else if (t == "thinking_stop")
@@ -411,6 +413,35 @@ static void test_parse_thinking()
     CHECK(c.stop_reason == "end_turn", "stop reason=end_turn");
 }
 
+/* 官方流的签名经块尾 signature_delta 下发（起始块不带），终值覆盖起始块那份 */
+static void test_parse_signature_delta()
+{
+    printf("[SseParser signature_delta]\n");
+    { // 起始块无签名，签名只在 delta 里
+        const auto c = run_parse({
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
+            "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+            "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"想一想\"}}\n\n"
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+            "\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-tail\"}}\n\n"
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        });
+        CHECK(c.ok, "解析全程无错");
+        CHECK(c.thinking == "想一想", "thinking_delta 正常拼接");
+        CHECK(c.thinking_sig == "sig-tail", "块尾 signature_delta 的签名进入结果");
+    }
+    { // 起始块带捷径签名，delta 的终值覆盖它
+        const auto c = run_parse({
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
+            "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig-1\"}}\n\n"
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+            "\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-2\"}}\n\n",
+        });
+        CHECK(c.thinking_sig == "sig-2", "后到的签名终值覆盖起始块的");
+    }
+}
+
 /* CRLF 分隔的 SSE（部分端点这么发）也得认 */
 static void test_parse_crlf()
 {
@@ -634,6 +665,7 @@ int main()
     test_parse_text();
     test_parse_tool_use();
     test_parse_thinking();
+    test_parse_signature_delta();
     test_parse_crlf();
     test_parse_malformed();
     test_usage();

@@ -7,8 +7,9 @@
  * 一个协议在一个方向上的全部知识（认证头、路径、体形状、帧结构、token 字段名）住在
  * 一个文件里：拆成独立开关就能配出无效组合。协议由用户选，没有默认、不从 URL 猜。
  *
- * 事件词汇只有一套：thinking_start / thinking_update / thinking_stop / message_update /
- * tool_use / usage / stop。usage 的字段统一叫 input / output / cache_read / cache_write。
+ * 事件词汇只有一套：thinking_start / thinking_update / thinking_signature / thinking_stop /
+ * message_update / tool_use / usage / stop。usage 的字段统一叫 input / output / cache_read /
+ * cache_write。thinking_signature 只进结果不广播：块尾 signature_delta 的签名终值。
  */
 #pragma once
 

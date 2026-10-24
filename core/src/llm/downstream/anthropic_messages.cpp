@@ -91,6 +91,13 @@ bool feed_block(protocol::AnthropicMessages, AnthropicState &st, std::string_vie
             {
                 sink("thinking_update", nlohmann::json{{"delta", delta.at("thinking")}});
             }
+            else if (dt == "signature_delta" && st.block_type_ == "thinking" && sink)
+            {
+                // 官方流的签名在思考块尾部以 signature_delta 下发，起始块里那份只是
+                // 部分端点的捷径；后到的终值覆盖
+                st.thinking_sig_ = delta.at("signature");
+                sink("thinking_signature", nlohmann::json{{"signature", st.thinking_sig_}});
+            }
             else if (dt == "input_json_delta" && st.block_type_ == "tool_use")
             {
                 st.tool_input_ += delta.at("partial_json").get<std::string>();

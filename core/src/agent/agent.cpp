@@ -204,6 +204,12 @@ void Agent::on_llm_event(std::string_view type, const json &ev, LlmOutcome &out,
         out.thinking_signature = ev["signature"];
     else if (type == "thinking_update")
         out.thinking += ev["delta"].get<std::string>();
+    else if (type == "thinking_signature")
+    {
+        // 块尾 signature_delta 的签名终值覆盖起始块；只进结果不广播，TUI 事件词汇不变
+        out.thinking_signature = ev["signature"];
+        return;
+    }
     else if (type == "tool_use")
         out.tool_uses.push_back(
             {ev["id"], ev["name"], ev["input"].is_null() ? "{}" : ev["input"].dump()});
