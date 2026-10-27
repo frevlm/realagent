@@ -1,7 +1,7 @@
 /*
  * llm.hpp — 一次 LLM 调用的三件事：造请求、解响应、算钱（ADR-0017）
  *
- *   对话 ──build_request──▶ HttpRequest ─[curl]─▶ SSE ──feed_block──▶ 事件 ──▶ Pricing::cost
+ *   对话 ──build_request──▶ HttpRequest ─[transport]─▶ SSE ──feed_block──▶ 事件 ──▶ Pricing::cost
  *        upstream/<协议>.cpp                         downstream/<协议>.cpp
  *
  * 一个协议在一个方向上的全部知识（认证头、路径、体形状、帧结构、token 字段名）住在
@@ -63,13 +63,11 @@ HttpRequest build_request(protocol::OpenAiResponses, const Config &cfg, const nl
 /* 按配置里的协议派发（调用前已由 endpoint_config_error 把关）。 */
 HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog);
 
-/* anthropic-messages：一条抽象消息的 content 块 → /v1/messages 块。
- * build_request 与 ContextSession::record_assistant 共用——assistant 消息进哈希链
- * 的字节必须与下一轮请求里的完全一致，转换只能有一份。 */
+/* anthropic-messages：一条抽象消息的 content 块 → /v1/messages 块。 */
 nlohmann::json anthropic_content_blocks(const nlohmann::json &message);
 
-/* 增量上下文协议（ContextSession）是否启用：配置开关打开且协议是
- * anthropic-messages——协议只有这一套。开关默认关，revlm 端也要开才生效。 */
+/* 增量上下文协议（ContextSession）是否启用：配置开关打开即可，与上游协议无关
+ * （字节级协议）。开关默认关，revlm 端也要开才生效。 */
 bool context_protocol_enabled(const Config &cfg);
 
 /* payload 只在回调内有效 */

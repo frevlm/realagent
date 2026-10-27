@@ -114,7 +114,7 @@ class Agent {
 
     nlohmann::json build_dialog(ModelTier tier) const;
     /* context 非空时这次调用走增量上下文协议（收工判定那次调用不传：每次判定都是
-     * 一段单条消息的新对话，接不上任何链）。 */
+     * 一段单条消息的新对话，没有可比的上一次请求体）。 */
     bool llm_call(const nlohmann::json &dialog, LlmOutcome &out, bool silent = false,
                   ContextSession *context = nullptr);
     std::string last_text() const;

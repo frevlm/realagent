@@ -1,256 +1,97 @@
 /*
  * context_session.cpp — 增量上下文协议的客户端（协议契约见 revlm docs/context-cache.md）
- *
- * 发送体的构造规则（与服务端同一套）：
- *   完整请求对象 → 剥 revlm_context → strip_cache_control 记 marks → 逐条 canonical
- *   得 blobs；完整拼装体 = assemble_request_body(request, blobs, marks)，expect 是
- *   它的 SHA-256。增量体 = 同一请求对象、messages 换尾部、system/tools 省掉
- *   （服务端按 shape 取回注入）、revlm_context 填 prefix/count/shape/cache_control
- *   （marks 全量，路径按完整请求计）/expect。
  */
 #include "llm/context_session.hpp"
 
-#include <boost/json/array.hpp>
-#include <boost/json/object.hpp>
-#include <boost/json/parse.hpp>
-#include <boost/json/serialize.hpp>
+#include <openssl/evp.h>
 
-#include <charconv>
+#include <algorithm>
 #include <cstdio>
-#include <exception>
-#include <variant>
 
-#include "llm/llm.hpp"
+#include "json.hpp"
 
 namespace realagent {
-namespace rllm = realurl::llm;
 
-namespace {
-
-/* marks（CacheMark/RequestMark 同形）→ revlm_context.cache_control 的 JSON 形状 */
-boost::json::value marks_to_json(const std::vector<rllm::RequestMark> &marks)
+std::string ContextSession::sha256_hex(std::string_view data)
 {
-    boost::json::array out;
-    for (const auto &m : marks)
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int n = 0;
+    EVP_Digest(data.data(), data.size(), md, &n, EVP_sha256(), nullptr);
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(n * 2);
+    for (unsigned int i = 0; i < n; ++i)
     {
-        boost::json::array path;
-        for (const auto &el : m.path)
-        {
-            if (const auto *key = std::get_if<std::string>(&el))
-                path.push_back(boost::json::value(*key));
-            else
-                path.push_back(boost::json::value(std::get<std::uint64_t>(el)));
-        }
-        boost::json::object o;
-        o["path"] = std::move(path);
-        o["value"] = m.value;
-        out.push_back(std::move(o));
+        out.push_back(kHex[md[i] >> 4]);
+        out.push_back(kHex[md[i] & 15]);
     }
     return out;
 }
 
-/* 请求里的 system / tools（剥过 cache_control 的），缺省为 null —— shape 只认这两样 */
-boost::json::value member_or_null(const boost::json::object &o, const char *key)
+ContextSession::Keep ContextSession::diff(std::string_view p, std::string_view b)
 {
-    const auto it = o.find(key);
-    return it == o.end() ? boost::json::value{} : it->value();
+    const std::size_t lim = std::min(p.size(), b.size());
+    std::size_t head = 0;
+    while (head < lim && p[head] == b[head]) ++head;
+    // tail 只在 head 之后的部分里找，保证 head + tail <= min(|p|, |b|)
+    const std::size_t room = lim - head;
+    std::size_t tail = 0;
+    while (tail < room && p[p.size() - 1 - tail] == b[b.size() - 1 - tail]) ++tail;
+    return {head, tail};
 }
 
-/* P3 键序规则：把 system/tools 移到对象末尾。用重建实现——erase 之后 operator[]
- * 是否真的追加在末尾是 boost 的实现细节，重建的顺序语义才是契约。 */
-boost::json::value shape_fields_at_end(boost::json::value request)
+ContextSession::Wire ContextSession::as_full()
 {
-    boost::json::object rebuilt;
-    std::optional<boost::json::value> system, tools;
-    bool touched = false;
-    for (const auto &kv : request.as_object())
-    {
-        if (kv.key() == "system")
-        {
-            system = kv.value();
-            touched = true;
-            continue;
-        }
-        if (kv.key() == "tools")
-        {
-            tools = kv.value();
-            touched = true;
-            continue;
-        }
-        rebuilt.emplace(kv.key(), kv.value());
-    }
-    if (!touched) return request;
-    if (system) rebuilt.emplace("system", std::move(*system));
-    if (tools) rebuilt.emplace("tools", std::move(*tools));
-    return boost::json::value(std::move(rebuilt));
+    delta_ = false;
+    sent_ = body_.size();
+    return {body_, {"X-Revlm-Expect: " + body_hex_}};
 }
 
-} // namespace
-
-std::string ContextSession::wrap_request(const std::string &full_request_body)
+ContextSession::Wire ContextSession::full()
 {
-    try
-    {
-        return wrap_throws(full_request_body);
-    } catch (const std::exception &e)
-    {
-        // 协议坏了不能坏了调用：退回原始完整体（连 revlm_context 都不带，当普通
-        // 请求发），下一轮从完整请求重新建立链。
-        fprintf(stderr, "[llm] revlm 上下文请求构造失败，本次退回完整请求：%s\n", e.what());
-        inc_wire_.clear();
-        pending_save_ = 0;
-        full_wire_ = full_request_body;
-        return full_request_body;
-    }
+    stats_.misses++;
+    return as_full();
 }
 
-std::string ContextSession::wrap_throws(const std::string &full_request_body)
+ContextSession::Wire ContextSession::prepare(const std::string &full_body)
 {
-    boost::json::value request = boost::json::parse(full_request_body);
-    boost::json::object &ro = request.as_object();
-    ro.erase("revlm_context"); // 本方不会放；按契约先剥掉再算
-    // strip 出来的是 CacheMark，路径相对剥掉后的请求根——正是 RequestMark 要的形状
-    std::vector<rllm::RequestMark> marks;
-    for (const rllm::CacheMark &m : rllm::strip_cache_control(request))
-        marks.push_back({m.path, m.value});
-    const boost::json::array &msgs = ro.at("messages").as_array();
+    body_ = full_body;
+    body_hex_ = sha256_hex(body_);
+    stats_.requests++;
+    const Keep k = base_.empty() ? Keep{} : diff(base_, body_);
+    if (k.head + k.tail < kMinSaving) return as_full();
 
-    std::vector<std::string> blobs;
-    blobs.reserve(msgs.size());
-    for (const auto &m : msgs) blobs.push_back(rllm::canonical_message(m));
-    const std::string shape =
-        rllm::to_hex(rllm::shape_hash(member_or_null(ro, "system"), member_or_null(ro, "tools")));
-
-    // 本地链对齐本次请求：公共前缀保留，其后截断、新消息逐条延伸——回退与改写
-    // 走的是同一条路，不是特殊情况。
-    std::size_t common = 0;
-    while (common < blobs_.size() && common < blobs.size() && blobs_[common] == blobs[common])
-        ++common;
-    const bool prefix_ok = !blobs_.empty() && common == blobs_.size() && shape_hex_ == shape;
-    blobs_.resize(common);
-    nodes_.resize(common + 1);
-    for (std::size_t i = common; i < blobs.size(); ++i)
-    {
-        blobs_.push_back(blobs[i]);
-        nodes_.push_back(rllm::chain_node(nodes_.back(), rllm::blob_hash(msgs[i])));
-    }
-    shape_hex_ = shape;
-
-    // 尾部消息先摘出来：下面的键增删会让成员搬家，msgs 这个引用不能跨过改动再用。
-    boost::json::array tail;
-    for (std::size_t i = common; i < msgs.size(); ++i) tail.push_back(msgs[i]);
-
-    // P3 键序规则：增量轮两侧都把 system/tools 挪到对象末尾再拼装——服务端按
-    // shape 注入必然在末尾，客户端也规范化后，拼装字节就不再依赖原本的序列化
-    // 顺序（否则 tool_choice 夹在 system 与 tools 之间这类键序必炸 expect）。
-    // 重建后 request 换了存储，旧引用（ro/msgs）从此作废。
-    if (prefix_ok)
-        request = shape_fields_at_end(std::move(request));
-
-    // 完整拼装体与 expect：两端各自动手、必须逐字节相同，所以都走共享模块
-    const std::string full_assembled = rllm::assemble_request_body(request, blobs, marks);
-    const std::string expect = rllm::sha256_hex(full_assembled);
-
-    // 完整发送体：同一请求对象 + revlm_context:{}
-    request.as_object()["revlm_context"] = boost::json::object{};
-    full_wire_ = boost::json::serialize(request);
-    if (!prefix_ok)
-    {
-        inc_wire_.clear();
-        pending_save_ = 0;
-        return full_wire_;
-    }
-
-    // 增量发送体：messages 换尾部，system/tools 省掉（服务端按 shape 取回注入），
-    // revlm_context 填协议字段；marks 的路径本来就是按完整请求计的。
-    // expect 仍是对完整拼装体的哈希——两侧注入同一份值，拼出的字节不变。
-    boost::json::object ctx;
-    ctx["prefix"] = rllm::to_hex(nodes_[common]);
-    ctx["count"] = static_cast<std::uint64_t>(common);
-    ctx["shape"] = shape_hex_;
-    ctx["cache_control"] = marks_to_json(marks);
-    ctx["expect"] = expect;
-    boost::json::object &ro2 = request.as_object();
-    ro2["revlm_context"] = std::move(ctx);
-    ro2["messages"] = std::move(tail);
-    ro2.erase("system");
-    ro2.erase("tools");
-    inc_wire_ = boost::json::serialize(request);
-    pending_save_ = static_cast<long long>(full_wire_.size()) - static_cast<long long>(inc_wire_.size());
-    stats_.incrementals++;
-    return inc_wire_;
+    delta_ = true;
+    stats_.deltas++;
+    Wire w{body_.substr(k.head, body_.size() - k.head - k.tail),
+           {"X-Revlm-Expect: " + body_hex_, "X-Revlm-Base: " + base_hex_,
+            "X-Revlm-Keep: " + std::to_string(k.head) + "," + std::to_string(k.tail)}};
+    sent_ = w.body.size();
+    return w;
 }
 
 bool ContextSession::is_conflict(long status, const std::string &error_body)
 {
     if (status != 409) return false;
     const nlohmann::json j = nlohmann::json::parse(error_body, nullptr, false);
-    if (!j.is_object()) return false;
-    const auto err = j.find("error");
-    if (err == j.end() || !err->is_object()) return false;
-    const auto t = err->find("type");
-    if (t == err->end() || !t->is_string()) return false;
-    const std::string type = *t;
-    return type == "revlm_context_miss" || type == "revlm_context_mismatch";
+    if (!j.is_object() || !j.contains("error") || !j["error"].is_object()) return false;
+    const nlohmann::json t = j["error"].value("type", nlohmann::json());
+    return t == "revlm_base_miss" || t == "revlm_expect_mismatch";
 }
 
-std::string ContextSession::resend_full()
+void ContextSession::on_response(const std::string &stored)
 {
-    stats_.misses++;
-    inc_wire_.clear(); // 这一轮的增量作废：命中账不再落
-    pending_save_ = 0;
-    return full_wire_;
-}
-
-void ContextSession::on_response(const std::string &header_value)
-{
-    if (!inc_wire_.empty())
+    if (delta_)
     {
         stats_.hits++;
-        stats_.bytes_saved += pending_save_;
+        stats_.bytes_saved += static_cast<long long>(body_.size()) - static_cast<long long>(sent_);
     }
-    inc_wire_.clear();
-    pending_save_ = 0;
-
-    // X-Revlm-Context: prefix=<hex>; count=<n>; shape=<hex>
-    std::string prefix;
-    std::size_t count = 0;
-    for (std::size_t pos = 0; pos < header_value.size();)
+    delta_ = false;
+    if (stored == body_hex_ && !stored.empty())
     {
-        const std::size_t semi = header_value.find(';', pos);
-        const std::size_t end = semi == std::string::npos ? header_value.size() : semi;
-        std::string piece = header_value.substr(pos, end - pos);
-        pos = end + 1;
-        const std::size_t eq = piece.find('=');
-        if (eq == std::string::npos) continue;
-        // 头字段以 "; " 分隔，name/value 两头都可能带空格
-        const auto trim = [](std::string s) {
-            while (!s.empty() && s.front() == ' ') s.erase(0, 1);
-            while (!s.empty() && s.back() == ' ') s.pop_back();
-            return s;
-        };
-        const std::string name = trim(piece.substr(0, eq)), value = trim(piece.substr(eq + 1));
-        if (name == "prefix")
-            prefix = value;
-        else if (name == "count")
-            std::from_chars(value.data(), value.data() + value.size(), count);
+        base_ = std::move(body_);
+        base_hex_ = stored;
     }
-    // 与本地不同只在服务端重组不一致时出现：以本地为准（不覆盖），下一轮 miss 自愈
-    if (prefix.size() == 64 && count < nodes_.size() && rllm::to_hex(nodes_[count]) != prefix)
-        fprintf(stderr, "[llm] revlm 上下文 prefix 与本地不一致（count=%zu），以本地为准\n",
-                count);
-}
-
-void ContextSession::record_assistant(const nlohmann::json &message)
-{
-    // 与下一轮请求同一份转换（upstream/anthropic_messages.cpp）：node 的字节必须跟
-    // build_request 产出的完全一致，否则每轮都 miss。
-    const nlohmann::json proto{
-        {"role", "assistant"}, {"content", anthropic_content_blocks(message)}};
-    boost::json::value v = boost::json::parse(proto.dump());
-    rllm::strip_cache_control(v); // assistant 侧不带；一条规则管所有消息
-    blobs_.push_back(rllm::canonical_message(v));
-    nodes_.push_back(rllm::chain_node(nodes_.back(), rllm::blob_hash(v)));
 }
 
 } // namespace realagent

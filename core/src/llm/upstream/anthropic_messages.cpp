@@ -46,8 +46,7 @@ nlohmann::json to_tool_content(const nlohmann::json &content)
 
 } // namespace
 
-/* 抽象消息 → /v1/messages 的 content 块。build_request 与 ContextSession 共用：
- * assistant 消息进哈希链的字节必须与下一轮请求里的完全一致，转换只能有一份。 */
+/* 抽象消息 → /v1/messages 的 content 块。 */
 nlohmann::json anthropic_content_blocks(const nlohmann::json &m)
 {
     nlohmann::json blocks = nlohmann::json::array();

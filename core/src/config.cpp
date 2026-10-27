@@ -17,8 +17,9 @@ nlohmann::json defaults()
     // mcp_http_bridge：http 型 MCP server 的桥接命令模板（ADR-0024 §5），空数组 = 不支持 http。
     // 占位符 {url} / {name} / {value}；子数组是每个 header 重复一次的那一组。
     // setup_done：首启引导走完过没有。false 时 TUI 启动先跑引导（GET / POST /setup）。
-    // revlm_context：增量上下文协议（revlm 的 /v1/messages 只发新增消息，revlm 端
-    // 拼回完整请求）。默认关；开了也只在对面 revlm 同样开的时候生效。
+    // revlm_context：增量上下文协议（只发与上一次请求体不同的中间字节，revlm 端按
+    // 字节拼回完整请求）。默认关；开了也只在对面 revlm 同样开的时候生效。开着就是说
+    // 对面是 revlm：请求改走 revlm::net（llm/transport）。
     return {{"permission", "ask"},
             {"setup_done", false},
             {"revlm_context", false},

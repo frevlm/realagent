@@ -11,8 +11,9 @@ foreach(name config llm context_session session skills tools agent verdict stop_
   add_test(NAME ${name} COMMAND test_${name})
 endforeach()
 
-# context_session 的 409 重发路径要一个本地 httplib 假 revlm 当对手
-target_link_libraries(test_context_session PRIVATE httplib::httplib)
+# context_session 的端到端要两个假 revlm 当对手：h2c 的（revlm::net 那条路）与只认
+# HTTP/1.1 的 httplib（退回 curl 那条路）
+target_link_libraries(test_context_session PRIVATE httplib::httplib revlm::net_test_server)
 
 # 测试二进制不在 realagent-core 旁边，PATH 照 core 启动时那样补上内置的 realontext
 set_tests_properties(tools PROPERTIES

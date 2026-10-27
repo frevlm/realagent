@@ -1,24 +1,29 @@
 /*
- * test_context_session.cpp — 增量上下文协议的客户端（ContextSession）
+ * test_context_session.cpp — 增量上下文协议的客户端（ContextSession，字节级增量）
  *
  * 单元部分不碰网络：
- *   完整请求 → 增量请求体（revlm_context 字段、messages 只带尾部、expect 与
- *   prefix/count/shape 全部与服务端同一套共享模块独立复算比对）；从增量体 +
- *   已知 blobs 反拼，与客户端本地完整体逐字节一致；回退与 shape 变化退完整请求；
- *   409 判别；统计数字。
+ *   head/tail/middle 重建性质（追加、中间改一处、cache_control 挪位、改 system、
+ *   完全相同、P 为空、随机串）；4 KiB 门槛；SHA-256 已知向量；P 只在 X-Revlm-Stored
+ *   等于 sha256(B) 时前进；409 判别；统计数字。
  *
- * 端到端部分用本地 httplib 假 revlm：第一次对增量请求回 409（miss / mismatch 两条
- * 路），断言自动重发的是完整体；随后一轮命中，且服务端回一个错的 prefix 头时
- * 客户端以本地为准继续。
+ * 端到端部分用本地假 revlm（按 sha256 存请求体、拼回增量、对不认识的 base 回 409
+ * revlm_base_miss、回 X-Revlm-Stored），同一个 Agent 跑多趟，中间强制 base 丢失与
+ * expect 不符各一次，断言每次都自动以完整体重发并恢复。假 revlm 有 h2c 与 HTTP/1.1
+ * 两个前端，各跑一遍：前者走 revlm::net，后者退回 curl。
  */
 #include <httplib.h>
+#include <support/h2_test_server.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,14 +34,9 @@
 #include "config.hpp"
 #include "llm/llm.hpp"
 
-#include <boost/json/object.hpp>
-#include <boost/json/parse.hpp>
-#include <boost/json/serialize.hpp>
-
 using namespace realagent;
 using nlohmann::json;
 namespace fs = std::filesystem;
-namespace rllm = realurl::llm;
 
 static int failures = 0;
 #define CHECK(cond, msg)                 \
@@ -53,359 +53,245 @@ static int failures = 0;
         }                                \
     } while (0)
 
-/* —— 配置：HOME 指到临时目录，revlm_context 开 —— */
-static Config make_config()
+/* —— 请求体素材：key 排序的 /v1/messages 形状，messages 在最前，model/system/tools 在后 —— */
+
+struct BodySpec {
+    std::vector<std::string> texts;
+    int cache_at = -1; // 哪条消息带 cache_control；-1 = 都不带
+    std::string system = "You are a coding agent.";
+    std::string tools = std::string(6000, 't');
+};
+
+static std::string make_body(const BodySpec &s)
 {
-    const std::string home = (fs::temp_directory_path() / "realagent_ctxsess_home").string();
-    fs::remove_all(home);
-    fs::create_directories(home + "/.realagent");
+    std::string out = "{\"messages\":[";
+    for (size_t i = 0; i < s.texts.size(); ++i)
     {
-        std::ofstream f(home + "/.realagent/settings.json");
-        f << R"({"protocol":"anthropic-messages","base_url":"http://127.0.0.1:9","api_key":"k",)"
-             R"("model":"m-test","permission":"allow-all","revlm_context":true})";
+        if (i) out += ',';
+        out += "{\"content\":[{";
+        if (static_cast<int>(i) == s.cache_at) out += "\"cache_control\":{\"type\":\"ephemeral\"},";
+        out += "\"text\":\"" + s.texts[i] + "\",\"type\":\"text\"}],\"role\":\"user\"}";
     }
-    setenv("HOME", home.c_str(), 1);
+    return out + "],\"model\":\"m\",\"system\":\"" + s.system + "\",\"tools\":\"" + s.tools + "\"}";
+}
+
+static std::string rand_text(std::mt19937 &rng, size_t n)
+{
+    std::string t(n, 'a');
+    for (char &c : t) c = static_cast<char>('a' + rng() % 26);
+    return t;
+}
+
+static BodySpec rand_spec(std::mt19937 &rng)
+{
+    BodySpec s;
+    const size_t n = 1 + rng() % 6;
+    for (size_t i = 0; i < n; ++i) s.texts.push_back(rand_text(rng, 1 + rng() % 400));
+    s.tools = rand_text(rng, rng() % 3000);
+    return s;
+}
+
+/* P[0:head] + middle + P[|P|-tail:] == B，且 head + tail <= min(|P|,|B|) */
+static bool reconstructs(const std::string &p, const std::string &b)
+{
+    const ContextSession::Keep k = ContextSession::diff(p, b);
+    if (k.head + k.tail > std::min(p.size(), b.size())) return false;
+    const std::string middle = b.substr(k.head, b.size() - k.head - k.tail);
+    return p.substr(0, k.head) + middle + p.substr(p.size() - k.tail) == b;
+}
+
+static void test_reconstruction()
+{
+    printf("[head/tail/middle 重建]\n");
+    std::mt19937 rng(12345);
+    int bad = 0, total = 0;
+    const auto run = [&](const std::string &p, const std::string &b) {
+        ++total;
+        if (!reconstructs(p, b)) ++bad;
+    };
+    for (int i = 0; i < 300; ++i)
+    {
+        BodySpec p = rand_spec(rng);
+        const std::string pb = make_body(p);
+
+        BodySpec app = p; // 追加
+        for (size_t k = 0, n = 1 + rng() % 3; k < n; ++k) app.texts.push_back(rand_text(rng, 50));
+        run(pb, make_body(app));
+
+        BodySpec ed = p; // 中间改一处
+        std::string &t = ed.texts[rng() % ed.texts.size()];
+        t[rng() % t.size()] = 'Z';
+        run(pb, make_body(ed));
+
+        BodySpec cc = p; // cache_control 挪位
+        p.cache_at = static_cast<int>(rng() % p.texts.size());
+        cc.cache_at = static_cast<int>(rng() % cc.texts.size());
+        run(make_body(p), make_body(cc));
+
+        BodySpec sys = p; // 改 system
+        sys.system += rand_text(rng, 1 + rng() % 40);
+        run(pb, make_body(sys));
+
+        run(pb, pb);                                                     // 完全相同
+        run("", pb);                                                     // P 为空
+        run(pb, "");                                                     // B 为空
+        run(rand_text(rng, rng() % 200), rand_text(rng, rng() % 200));   // 随机串
+        run(std::string(rng() % 50, 'x'), std::string(rng() % 50, 'x')); // 重复字节：head/tail 抢同一段
+    }
+    CHECK(total == 300 * 9 && bad == 0, "2700 组 (P,B) 全部满足重建 B == P[0:head]+middle+P[|P|-tail:]");
+
+    const std::string p = make_body({{"hello"}});
+    BodySpec two{{"hello", "again"}};
+    const ContextSession::Keep k = ContextSession::diff(p, make_body(two));
+    CHECK(k.head == p.find("],\"model\"") && k.tail == p.size() - p.find("],\"model\""),
+          "追加一条消息：head 到旧 messages 数组闭合之前，tail 是其后的全部字节");
+    const ContextSession::Keep same = ContextSession::diff(p, p);
+    CHECK(same.head == p.size() && same.tail == 0, "完全相同：head = |P|，tail = 0");
+}
+
+static void test_sha256()
+{
+    printf("[SHA-256]\n");
+    CHECK(ContextSession::sha256_hex("abc") ==
+              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "abc 的已知向量");
+    CHECK(ContextSession::sha256_hex("") ==
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "空串的已知向量");
+}
+
+/* 发送体里的某个协议头；没有 → 空串 */
+static std::string header_of(const ContextSession::Wire &w, const std::string &name)
+{
+    for (const std::string &h : w.headers)
+        if (h.starts_with(name + ": ")) return h.substr(name.size() + 2);
+    return "";
+}
+
+/* 门槛：P = X + "a" + Y，B = X + "b" + Y，省下 |X|+|Y| 字节 */
+static ContextSession::Wire send_pair(size_t saved)
+{
+    ContextSession cs;
+    const std::string x(saved / 2, 'x'), y(saved - saved / 2, 'y');
+    const std::string p = x + "a" + y;
+    cs.prepare(p);
+    cs.on_response(ContextSession::sha256_hex(p));
+    return cs.prepare(x + "b" + y);
+}
+
+static void test_threshold()
+{
+    printf("[4 KiB 门槛]\n");
+    const ContextSession::Wire below = send_pair(4095);
+    CHECK(header_of(below, "X-Revlm-Base").empty() && header_of(below, "X-Revlm-Keep").empty() &&
+              !header_of(below, "X-Revlm-Expect").empty(),
+          "省 4095 字节：完整模式，只带 Expect");
+    CHECK(below.body.size() == 4096, "完整模式的请求体是整个 B（4095 + 1 字节）");
+
+    const ContextSession::Wire at = send_pair(4096);
+    CHECK(header_of(at, "X-Revlm-Keep") == "2048,2048", "省 4096 字节：增量模式，Keep = head,tail");
+    CHECK(at.body == "b", "增量体只有 middle");
+    CHECK(header_of(at, "X-Revlm-Base") == ContextSession::sha256_hex(std::string(2048, 'x') + "a" +
+                                                                      std::string(2048, 'y')),
+          "Base 是 P 的 SHA-256");
+    CHECK(header_of(at, "X-Revlm-Expect") ==
+              ContextSession::sha256_hex(std::string(2048, 'x') + "b" + std::string(2048, 'y')),
+          "Expect 是完整 B 的 SHA-256");
+}
+
+static void test_base_advances_only_on_stored()
+{
+    printf("[P 只在 X-Revlm-Stored 匹配时前进]\n");
+    const std::string head(5000, 'h');
+    const auto body = [&](const std::string &mid) { return head + mid + "|tail"; };
+    ContextSession cs;
+
+    cs.prepare(body("1"));
+    cs.on_response(""); // 没带头：没存下
+    ContextSession::Wire w = cs.prepare(body("2"));
+    CHECK(header_of(w, "X-Revlm-Base").empty(), "响应没带 Stored：下一轮仍是完整体");
+
+    cs.on_response(ContextSession::sha256_hex(body("other"))); // 别的请求体的 id
+    w = cs.prepare(body("3"));
+    CHECK(header_of(w, "X-Revlm-Base").empty(), "Stored 与 sha256(B) 不符：下一轮仍是完整体");
+
+    cs.on_response(ContextSession::sha256_hex(body("3")));
+    w = cs.prepare(body("4"));
+    CHECK(header_of(w, "X-Revlm-Base") == ContextSession::sha256_hex(body("3")),
+          "Stored 匹配：B 成为 base");
+    CHECK(w.body == "4", "增量体是 middle");
+
+    // 409 之后重发完整体；重发成功存下的是这一份
+    w = cs.full();
+    CHECK(header_of(w, "X-Revlm-Base").empty() && w.body == body("4"), "full()：完整模式、完整体");
+    cs.on_response(ContextSession::sha256_hex(body("4")));
+    w = cs.prepare(body("5"));
+    CHECK(header_of(w, "X-Revlm-Base") == ContextSession::sha256_hex(body("4")),
+          "重发被存下后，下一轮以它为 base");
+}
+
+static void test_conflict_detection()
+{
+    printf("[409 判别]\n");
+    const auto err = [](const char *type) {
+        return std::string(R"({"type":"error","error":{"type":")") + type + R"(","message":"x"}})";
+    };
+    CHECK(ContextSession::is_conflict(409, err("revlm_base_miss")), "409 revlm_base_miss");
+    CHECK(ContextSession::is_conflict(409, err("revlm_expect_mismatch")), "409 revlm_expect_mismatch");
+    CHECK(ContextSession::is_conflict(409, err("something_else")) == false, "其它 409 是真错误");
+    CHECK(ContextSession::is_conflict(409, "not json") == false, "409 但错误体不是 JSON");
+    CHECK(ContextSession::is_conflict(400, err("revlm_base_miss")) == false, "非 409 不算");
+}
+
+static void test_stats()
+{
+    printf("[统计]\n");
+    const std::string head(6000, 'h');
+    const auto body = [&](const std::string &mid) { return head + mid + "|tail"; };
+    ContextSession cs;
+
+    cs.prepare(body("1"));
+    cs.on_response(ContextSession::sha256_hex(body("1")));
+    const ContextSession::Wire w = cs.prepare(body("22"));
+    cs.on_response(ContextSession::sha256_hex(body("22")));
+    ContextSession::Stats s = cs.stats();
+    CHECK(s.requests == 2 && s.deltas == 1 && s.hits == 1 && s.misses == 0, "一次完整、一次增量命中");
+    CHECK(s.bytes_saved == static_cast<long long>(body("22").size() - w.body.size()),
+          "bytes_saved = |B| - |实际发送体|");
+
+    cs.prepare(body("333"));
+    cs.full();
+    cs.on_response(ContextSession::sha256_hex(body("333")));
+    s = cs.stats();
+    CHECK(s.requests == 3 && s.deltas == 2 && s.hits == 1 && s.misses == 1,
+          "增量被 409：记一次 miss，重发成功不落命中");
+}
+
+static Config load_config(const std::string &protocol, const std::string &base_url)
+{
+    const fs::path home = fs::temp_directory_path() / ("realagent_ctxsess_home_" + protocol);
+    fs::remove_all(home);
+    fs::create_directories(home / ".realagent");
+    json s{{"protocol", protocol}, {"base_url", base_url}, {"api_key", "k"}, {"model", "m-test"}, {"permission", "allow-all"}, {"revlm_context", true}};
+    std::ofstream(home / ".realagent" / "settings.json") << s.dump();
+    ::setenv("HOME", home.c_str(), 1);
     auto cfg = Config::load();
     if (!cfg)
     {
         printf("  FAIL: Config::load: %s\n", cfg.error().c_str());
         std::exit(1);
     }
-    CHECK(context_protocol_enabled(*cfg), "开关打开且协议是 anthropic-messages → 启用");
     return std::move(*cfg);
 }
 
-/* —— 对话素材（抽象形状） —— */
-static json user_msg(const std::string &text)
+static void test_protocols_enabled()
 {
-    return json{{"role", "user"}, {"content", json::array({json{{"type", "text"}, {"text", text}}})}};
-}
-
-static const json kAssistant1 = json::parse(R"({
-  "role": "assistant",
-  "content": [
-    {"type":"thinking","thinking":"先分析问题","signature":"sig-abc"},
-    {"type":"text","text":"world"}
-  ]})");
-
-static json dialog1(const std::string &system, bool with_tools)
-{
-    json d{{"model", "m-test"}, {"system", system}, {"messages", json::array({user_msg("hello")})}};
-    if (with_tools)
-        d["tools"] = json::parse(
-            R"([{"name":"read","description":"读文件","input_schema":{"type":"object"}}])");
-    return d;
-}
-
-static json dialog3(const std::string &system, bool with_tools)
-{
-    json d = dialog1(system, with_tools);
-    d["messages"].push_back(kAssistant1);
-    d["messages"].push_back(user_msg("second"));
-    return d;
-}
-
-/* —— 与服务端同一套共享模块的独立复算 —— */
-
-/* 完整请求体文本 → 拼装体（剥 revlm_context / cache_control → blobs → assemble）。
- * move_shape_to_end = 增量轮的键序规则：system/tools 挪到对象末尾再拼装，
- * 与服务端按 shape 注入的追加位置一致（P3）。 */
-static std::string assemble_full(const std::string &body_text,
-                                 std::vector<rllm::RequestMark> *marks_out = nullptr,
-                                 std::vector<std::string> *blobs_out = nullptr,
-                                 bool move_shape_to_end = false)
-{
-    boost::json::value request = boost::json::parse(body_text);
-    boost::json::object &ro = request.as_object();
-    ro.erase("revlm_context");
-    std::vector<rllm::RequestMark> marks;
-    for (const rllm::CacheMark &m : rllm::strip_cache_control(request))
-        marks.push_back({m.path, m.value});
-    std::vector<std::string> blobs;
-    for (const auto &m : ro.at("messages").as_array())
-        blobs.push_back(rllm::canonical_message(m));
-    if (move_shape_to_end)
+    printf("[三种协议都启用]\n");
+    for (const char *p : {"anthropic-messages", "openai-chat", "openai-responses"})
     {
-        // 重建实现，与客户端同一规则；erase 后 operator[] 是否在末尾是实现细节
-        boost::json::object rebuilt;
-        std::optional<boost::json::value> system, tools;
-        for (const auto &kv : ro)
-        {
-            if (kv.key() == "system")
-            {
-                system = kv.value();
-                continue;
-            }
-            if (kv.key() == "tools")
-            {
-                tools = kv.value();
-                continue;
-            }
-            rebuilt.emplace(kv.key(), kv.value());
-        }
-        if (system) rebuilt.emplace("system", std::move(*system));
-        if (tools) rebuilt.emplace("tools", std::move(*tools));
-        request = boost::json::value(std::move(rebuilt));
+        const Config cfg = load_config(p, "http://127.0.0.1:9");
+        CHECK(context_protocol_enabled(cfg), p);
     }
-    if (marks_out) *marks_out = marks;
-    if (blobs_out) *blobs_out = blobs;
-    return rllm::assemble_request_body(request, blobs, marks);
-}
-
-/* revlm_context.cache_control 的 JSON → marks（服务端收到后就是这么解的） */
-static std::vector<rllm::RequestMark> marks_from_json(const boost::json::value &v)
-{
-    std::vector<rllm::RequestMark> out;
-    for (const auto &e : v.as_array())
-    {
-        rllm::RequestMark m;
-        for (const auto &el : e.as_object().at("path").as_array())
-        {
-            if (el.is_string())
-                m.path.push_back(std::string(el.as_string().c_str()));
-            else
-                m.path.push_back(el.to_number<std::uint64_t>());
-        }
-        m.value = e.as_object().at("value");
-        out.push_back(std::move(m));
-    }
-    return out;
-}
-
-/* 协议形状的 assistant 消息（与 record_assistant 内部同一条转换） */
-static boost::json::value protocol_assistant(const json &abstract)
-{
-    return boost::json::parse(
-        json{{"role", "assistant"}, {"content", anthropic_content_blocks(abstract)}}.dump());
-}
-
-/* —— 单元：完整 → 增量 → 反拼 —— */
-static void test_full_then_incremental()
-{
-    printf("[完整 → 增量 → 反拼]\n");
-    const Config cfg = make_config();
-    ContextSession cs;
-
-    const std::string r1 = build_request(cfg, dialog1("You are a coding agent.", true)).body;
-    const std::string wire1 = cs.wrap_request(r1);
-    const json w1 = json::parse(wire1);
-    CHECK(w1["revlm_context"].is_object() && w1["revlm_context"].empty(),
-          "首轮 revlm_context:{}（客户端还不知道任何前缀）");
-    CHECK(w1["messages"].size() == 1, "首轮 messages 带全部消息");
-
-    cs.record_assistant(kAssistant1);
-
-    const std::string r2 =
-        build_request(cfg, dialog3("You are a coding agent.", true)).body;
-    // dialog3 的第二条 user 是"second"，而历史只到 assistant —— 直接在请求 2 里
-    // 验证它确实是三条消息的完整体
-    CHECK(json::parse(r2)["messages"].size() == 3, "请求 2 是三消息完整体");
-
-    const std::string wire2 = cs.wrap_request(r2);
-    const json w2 = json::parse(wire2);
-    CHECK(w2["messages"].size() == 1, "增量 messages 只带尾部");
-    CHECK(!w2.contains("system") && !w2.contains("tools"),
-          "P3：增量体省略 system/tools（shape 引用，服务端取回注入）");
-    CHECK(w2["messages"][0]["role"] == "user" &&
-              w2["messages"][0]["content"][0]["text"] == "second",
-          "尾部是第 k+1 条起的新消息");
-    const json &ctx2 = w2["revlm_context"];
-    CHECK(ctx2["count"] == 2, "count = 已知前缀深度（u1 + assistant）");
-
-    /* prefix：本地按同一套链独立复算 node(2) */
-    boost::json::value u1 = boost::json::parse(r1).as_object().at("messages").as_array()[0];
-    rllm::strip_cache_control(u1);
-    rllm::Node n = rllm::chain_node(rllm::root_node(), rllm::blob_hash(u1));
-    n = rllm::chain_node(n, rllm::blob_hash(protocol_assistant(kAssistant1)));
-    CHECK(ctx2["prefix"] == rllm::to_hex(n), "prefix = 本地复算的 node(2)（KAT：与服务端同函数）");
-
-    /* expect 与 shape：对完整请求的独立拼装 */
-    std::vector<std::string> blobs2;
-    const std::string full2 = assemble_full(r2, nullptr, &blobs2, /*move_shape_to_end=*/true);
-    CHECK(ctx2["expect"] == rllm::sha256_hex(full2),
-          "expect = 完整拼装体的 SHA-256（不是增量体的）");
-    boost::json::value R2 = boost::json::parse(r2);
-    CHECK(ctx2["shape"] ==
-              rllm::to_hex(rllm::shape_hash(R2.as_object().at("system"),
-                                            R2.as_object().at("tools"))),
-          "shape = system+tools 的哈希");
-
-    /* 反拼（服务端视角）：增量体 + 已知 blobs + 随体 marks + 按 shape 注入的
-     * system/tools → 完整请求体 */
-    boost::json::value W = boost::json::parse(wire2);
-    const boost::json::object cx = W.as_object().at("revlm_context").as_object();
-    W.as_object().erase("revlm_context");
-    boost::json::value sys = R2.as_object().at("system");
-    boost::json::value tls = R2.as_object().at("tools");
-    rllm::strip_cache_control(sys); // shape 存的是剥过 cache_control 的那份
-    rllm::strip_cache_control(tls);
-    W.as_object()["system"] = std::move(sys);
-    W.as_object()["tools"] = std::move(tls);
-    std::vector<std::string> known{blobs2[0],
-                                   rllm::canonical_message(protocol_assistant(kAssistant1))};
-    for (auto &m : W.as_object().at("messages").as_array())
-    {
-        rllm::strip_cache_control(m); // 服务端收到增量体也会再剥一遍
-        known.push_back(rllm::canonical_message(m));
-    }
-    const std::string reassembled =
-        rllm::assemble_request_body(W, known, marks_from_json(cx.at("cache_control")));
-    CHECK(reassembled == full2,
-          "从增量体 + 已知 blobs 反拼 == 客户端本地完整体（逐字节，含键序）");
-}
-
-/* —— 单元：cache_control 的 marks 全量随体、路径按完整请求计 —— */
-static void test_marks_roundtrip()
-{
-    printf("[cache_control marks]\n");
-    const Config cfg = make_config();
-    ContextSession cs;
-
-    // 手工请求体：system 数组带断点、消息块里也带断点（upstream 今天不发
-    // cache_control，这里直接造，验协议本身的搬运）
-    json short_body = json::parse(R"({
-      "model": "m-test",
-      "max_tokens": 100,
-      "stream": true,
-      "system": [
-        {"type":"text","text":"sys 1","cache_control":{"type":"ephemeral"}},
-        {"type":"text","text":"sys 2"}
-      ],
-      "messages": [
-        {"role":"user","content":[
-          {"type":"text","text":"a"},
-          {"type":"text","text":"b","cache_control":{"type":"ephemeral"}}]},
-        {"role":"assistant","content":[{"type":"text","text":"ok"}]}
-      ]})");
-    cs.wrap_request(short_body.dump());
-
-    json long_body = json::parse(short_body.dump());
-    long_body["messages"].push_back(user_msg("next"));
-    const std::string wire = cs.wrap_request(long_body.dump());
-    const json w = json::parse(wire);
-    CHECK(w["messages"].size() == 1, "增量只带尾部（marks 不影响消息条数）");
-    const json &cc = w["revlm_context"]["cache_control"];
-    CHECK(cc.is_array() && cc.size() == 2, "marks 全量随体（system 一处 + 消息块一处）");
-    // strip 按文档序产出（请求键按字母序，messages 在 system 前），按 path 首元素认
-    json sys_mark, msg_mark;
-    for (const auto &m : cc)
-        if (!m["path"].empty() && m["path"][0] == "system")
-            sys_mark = m;
-        else
-            msg_mark = m;
-    CHECK(sys_mark["path"] == json::array({"system", 0}) &&
-              sys_mark["value"]["type"] == "ephemeral",
-          "system 上的 mark 路径按完整请求计");
-    CHECK(msg_mark["path"] == json::array({"messages", 0, "content", 1}),
-          "消息块上的 mark 路径按完整请求的条数计");
-
-    /* 反拼：断点插回去的位置与本地完整拼装一致。已知 blobs 取前两条消息（剥掉
-     * cache_control 再 canonical，链条哈希的不参与） */
-    boost::json::value W = boost::json::parse(wire);
-    const boost::json::object cx = W.as_object().at("revlm_context").as_object();
-    W.as_object().erase("revlm_context");
-    boost::json::value head = boost::json::parse(short_body.dump());
-    rllm::strip_cache_control(head);
-    W.as_object()["system"] = head.as_object().at("system"); // 服务端按 shape 注入（剥过的）
-    std::vector<std::string> known;
-    for (const auto &m : head.as_object().at("messages").as_array())
-        known.push_back(rllm::canonical_message(m));
-    for (const auto &m : W.as_object().at("messages").as_array())
-        known.push_back(rllm::canonical_message(m));
-    const std::string reassembled =
-        rllm::assemble_request_body(W, known, marks_from_json(cx.at("cache_control")));
-    CHECK(reassembled == assemble_full(long_body.dump(), nullptr, nullptr, true),
-          "断点插回后的反拼 == 完整拼装（cache_control 位置也一致，P3 键序）");
-}
-
-/* —— 单元：历史对不上 / shape 变了 → 完整请求 —— */
-static void test_fallbacks()
-{
-    printf("[回退完整请求]\n");
-    const Config cfg = make_config();
-    ContextSession cs;
-
-    const std::string r1 = build_request(cfg, dialog1("You are a coding agent.", true)).body;
-    cs.wrap_request(r1);
-    cs.record_assistant(kAssistant1);
-
-    { // 回退：历史比已知前缀短（上下文压缩/rewind 后的形状）
-        const std::string wire = cs.wrap_request(r1);
-        const json w = json::parse(wire);
-        CHECK(w["revlm_context"].is_object() && w["revlm_context"].empty(),
-              "历史对不上已知前缀 → 退回 revlm_context:{}");
-        CHECK(w["messages"].size() == 1, "完整体带全部消息");
-    }
-    { // shape 变了：system 换了内容，消息链没变也不能增量（省一次 409 往返）
-        const std::string r2 =
-            build_request(cfg, dialog3("Another system prompt.", true)).body;
-        const std::string wire = cs.wrap_request(r2);
-        const json w = json::parse(wire);
-        CHECK(w["revlm_context"].is_object() && w["revlm_context"].empty(),
-              "shape 变化 → 本地直接退回完整请求");
-    }
-    CHECK(cs.stats().incrementals == 0, "两次回退都不产生增量计数");
-}
-
-/* —— 单元：409 判别 —— */
-static void test_conflict_detection()
-{
-    printf("[409 判别]\n");
-    CHECK(ContextSession::is_conflict(
-              409, R"({"type":"error","error":{"type":"revlm_context_miss","message":"prefix"}})"),
-          "revlm_context_miss → 重发完整请求");
-    CHECK(ContextSession::is_conflict(
-              409,
-              R"({"type":"error","error":{"type":"revlm_context_mismatch","message":"expect differs"}})"),
-          "revlm_context_mismatch → 重发完整请求");
-    CHECK(!ContextSession::is_conflict(
-              409, R"({"type":"error","error":{"type":"overloaded_error","message":"busy"}})"),
-          "其余 409 是真错误，不重发");
-    CHECK(!ContextSession::is_conflict(
-              400, R"({"type":"error","error":{"type":"revlm_context_miss","message":"prefix"}})"),
-          "状态码不是 409 不算");
-    CHECK(!ContextSession::is_conflict(409, "not json"), "错误体不是 JSON 不算");
-}
-
-/* —— 单元：统计 —— */
-static void test_stats()
-{
-    printf("[统计]\n");
-    const Config cfg = make_config();
-    ContextSession cs;
-
-    const std::string r1 = build_request(cfg, dialog1("You are a coding agent.", true)).body;
-    cs.wrap_request(r1);
-    cs.on_response(""); // 完整体成功：不算命中
-    CHECK(cs.stats().hits == 0 && cs.stats().incrementals == 0, "首轮完整体不产生命中");
-
-    cs.record_assistant(kAssistant1);
-    const std::string r2 = build_request(cfg, dialog3("You are a coding agent.", true)).body;
-    const std::string wire2 = cs.wrap_request(r2);
-    CHECK(cs.stats().incrementals == 1, "第二轮发出增量体");
-    cs.on_response("prefix=" + std::string(64, '0') + "; count=2; shape=" + std::string(64, '0'));
-    CHECK(cs.stats().hits == 1, "增量成功 → 命中（服务端 prefix 不一致不影响落账）");
-
-    // 节省字节 = 完整发送体 - 增量发送体；完整发送体独立构造（同一请求 + revlm_context:{}）
-    boost::json::value R2f = boost::json::parse(r2);
-    R2f.as_object()["revlm_context"] = boost::json::object{};
-    const long long want =
-        (long long)boost::json::serialize(R2f).size() - (long long)wire2.size();
-    CHECK(cs.stats().bytes_saved == want, "节省字节 = 完整体大小 - 实际发送体大小");
-
-    // 409：miss 计一次，重发后的成功不落命中
-    const json second_reply{{"role", "assistant"},
-                            {"content", json::array({json{{"type", "text"}, {"text", "second"}}})}};
-    cs.record_assistant(second_reply);
-    json d3 = dialog3("You are a coding agent.", true);
-    d3["messages"].push_back(second_reply);
-    d3["messages"].push_back(user_msg("third"));
-    cs.wrap_request(build_request(cfg, d3).body);
-    CHECK(cs.stats().incrementals == 2, "第三轮又是增量体");
-    cs.resend_full();
-    cs.on_response("prefix=" + std::string(64, '0') + "; count=4; shape=" + std::string(64, '0'));
-    CHECK(cs.stats().misses == 1 && cs.stats().hits == 1,
-          "409 记一次未命中；重发完整体成功不落命中");
 }
 
 /* —— 端到端：httplib 假 revlm —— */
@@ -441,59 +327,158 @@ static std::string sse_tool_use()
            "event: message_delta\ndata: " + stop.dump() + "\n\n";
 }
 
-/* 假 revlm：收下每个请求体；对第一个增量请求回一次 409，其余 200 SSE。
- * 200 的响应头故意带一个全零 prefix —— 客户端必须以本地为准。 */
+/* 假 revlm：按 sha256 存请求体；增量请求按 Base/Keep 拼回，base 不认识 → 409
+ * revlm_base_miss，拼出的字节与 Expect 不符 → 409 revlm_expect_mismatch；成功后回
+ * X-Revlm-Stored。第一个请求回 tool_use，其余回文本。协议逻辑与传输无关，两个前端：
+ * H2FakeRevlm（h2c，realagent 走 revlm::net）与 H1FakeRevlm（只认 HTTP/1.1，realagent
+ * 退回 curl）。 */
 class FakeRevlm {
   public:
-    explicit FakeRevlm(std::string conflict_type) : type_(std::move(conflict_type))
+    struct Seen {
+        bool delta = false;
+        int status = 0;
+        std::string body; // 拼回后的完整体（拼不出来 = 空）
+    };
+
+    virtual ~FakeRevlm() = default;
+    virtual std::string base_url() const = 0;
+
+    std::vector<Seen> seen() const
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return seen_;
+    }
+    void forget_all() // 模拟存储被清理 / 换了实例
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        store_.clear();
+    }
+    void corrupt_next_delta() // 下一个增量请求的拼装结果与 Expect 对不上
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        corrupt_ = true;
+    }
+
+  protected:
+    struct Reply {
+        int status = 200;
+        std::string content_type;
+        std::string body;
+        std::string stored; // X-Revlm-Stored；空 = 不带
+    };
+
+    /* header(name) 取请求头，没有就是空串。 */
+    Reply serve(const std::function<std::string(const char *)> &header, const std::string &body)
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        Reply rp;
+        const Seen seen = handle(header, body, rp);
+        seen_.push_back(seen);
+        if (rp.status != 200) return rp;
+        rp.content_type = "text/event-stream";
+        rp.stored = ContextSession::sha256_hex(seen.body);
+        rp.body = served_++ == 0 ? sse_tool_use() : sse_text("REPLY");
+        return rp;
+    }
+
+  private:
+    static void conflict(Reply &rp, const char *type)
+    {
+        rp.status = 409;
+        rp.content_type = "application/json";
+        rp.body = std::string(R"({"type":"error","error":{"type":")") + type + R"(","message":"x"}})";
+    }
+
+    Seen handle(const std::function<std::string(const char *)> &header, const std::string &body, Reply &rp)
+    {
+        Seen seen;
+        seen.delta = !header("X-Revlm-Base").empty();
+        std::string full = body;
+        if (seen.delta)
+        {
+            const auto base = store_.find(header("X-Revlm-Base"));
+            size_t head = 0, tail = 0;
+            if (sscanf(header("X-Revlm-Keep").c_str(), "%zu,%zu", &head, &tail) != 2 ||
+                base == store_.end() || head + tail > base->second.size())
+            {
+                seen.status = 409;
+                conflict(rp, "revlm_base_miss");
+                return seen;
+            }
+            const std::string &p = base->second;
+            full = p.substr(0, head) + body + p.substr(p.size() - tail);
+            if (std::exchange(corrupt_, false)) full += "!";
+        }
+        if (ContextSession::sha256_hex(full) != header("X-Revlm-Expect"))
+        {
+            seen.status = 409;
+            conflict(rp, "revlm_expect_mismatch");
+            return seen;
+        }
+        store_[ContextSession::sha256_hex(full)] = full;
+        seen.status = rp.status = 200;
+        seen.body = full;
+        return seen;
+    }
+
+    mutable std::mutex mtx_;
+    std::map<std::string, std::string> store_;
+    std::vector<Seen> seen_;
+    int served_ = 0;
+    bool corrupt_ = false;
+};
+
+class H2FakeRevlm : public FakeRevlm {
+  public:
+    H2FakeRevlm()
+        : svr_([this](const revlm::net::test::H2TestRequest &rq) {
+              const auto header = [&rq](const char *name) {
+                  std::string want(name);
+                  for (char &c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                  for (const auto &h : rq.headers)
+                      if (h.name == want) return h.value;
+                  return std::string();
+              };
+              const Reply rp = serve(header, rq.body);
+              revlm::net::test::H2TestResponse rs;
+              rs.status = rp.status;
+              rs.headers.push_back({"content-type", rp.content_type});
+              if (!rp.stored.empty()) rs.headers.push_back({"x-revlm-stored", rp.stored});
+              rs.body = rp.body;
+              return rs;
+          })
+    {
+    }
+    std::string base_url() const override { return "http://127.0.0.1:" + std::to_string(svr_.port()); }
+
+  private:
+    revlm::net::test::H2TestServer svr_;
+};
+
+class H1FakeRevlm : public FakeRevlm {
+  public:
+    H1FakeRevlm()
     {
         svr_.Post("/v1/messages", [this](const httplib::Request &rq, httplib::Response &rs) {
-            std::lock_guard<std::mutex> lk(mtx_);
-            bodies_.push_back(rq.body);
-            const json body = json::parse(rq.body, nullptr, false);
-            const bool incremental = body.is_object() && body.contains("revlm_context") &&
-                                     body["revlm_context"].is_object() &&
-                                     body["revlm_context"].contains("prefix");
-            if (incremental && conflicts_sent_ == 0)
-            {
-                ++conflicts_sent_;
-                rs.status = 409;
-                rs.set_content(
-                    R"({"type":"error","error":{"type":")" + type_ + R"(","message":"prefix"}})",
-                    "application/json");
-                return;
-            }
-            rs.status = 200;
-            rs.set_header("Content-Type", "text/event-stream");
-            rs.set_header("X-Revlm-Context",
-                          "prefix=" + std::string(64, '0') + "; count=1; shape=" +
-                              std::string(64, '0'));
-            rs.body = bodies_.size() == 1 ? sse_tool_use() : sse_text("SECOND_REPLY");
+            const Reply rp = serve([&rq](const char *name) { return rq.get_header_value(name); }, rq.body);
+            rs.status = rp.status;
+            if (!rp.stored.empty()) rs.set_header("X-Revlm-Stored", rp.stored);
+            rs.set_content(rp.body, rp.content_type);
         });
         port_ = svr_.bind_to_any_port("127.0.0.1");
         th_ = std::thread([this] { svr_.listen_after_bind(); });
     }
-    ~FakeRevlm()
+    ~H1FakeRevlm() override
     {
         svr_.stop();
         if (th_.joinable()) th_.join();
     }
-
-    std::string base_url() const { return "http://127.0.0.1:" + std::to_string(port_); }
-    std::vector<std::string> bodies() const
-    {
-        std::lock_guard<std::mutex> lk(mtx_);
-        return bodies_;
-    }
+    std::string base_url() const override { return "http://127.0.0.1:" + std::to_string(port_); }
 
   private:
-    std::string type_;
     httplib::Server svr_;
     int port_ = 0;
     std::thread th_;
-    mutable std::mutex mtx_;
-    std::vector<std::string> bodies_;
-    int conflicts_sent_ = 0;
 };
 
 /* 收到的帧（等 agent_end 用） */
@@ -525,113 +510,86 @@ static bool wait_end(const Frames &f, int n)
     return false;
 }
 
-/* 409 两条路（miss / mismatch）走同一条剧本。同一个 Agent 跑两趟：会话状态跟着
- * Agent 走，新 Agent 是新会话（首轮必发完整请求）。 */
-static void run_conflict_scenario(const char *type)
+/* 一趟 post 之后，假服务端新增的请求 */
+static std::vector<FakeRevlm::Seen> since(const FakeRevlm &ep, size_t from)
 {
-    FakeRevlm ep(type);
-    const fs::path home =
-        fs::temp_directory_path() / ("realagent-ctx-e2e-" + std::string(type));
-    fs::remove_all(home);
-    fs::create_directories(home / ".realagent");
-    ::setenv("HOME", home.c_str(), 1);
-    {
-        json s{{"protocol", "anthropic-messages"},
-               {"base_url", ep.base_url()},
-               {"api_key", "k"},
-               {"model", "m-main"},
-               {"permission", "allow-all"},
-               {"revlm_context", true}};
-        std::ofstream(home / ".realagent" / "settings.json") << s.dump();
-    }
-    auto cfg = Config::load();
-    if (!cfg)
-    {
-        printf("  FAIL: 配置加载失败\n");
-        ++failures;
-        return;
-    }
+    const std::vector<FakeRevlm::Seen> all = ep.seen();
+    return {all.begin() + std::min(from, all.size()), all.end()};
+}
+
+static void test_e2e(FakeRevlm &ep)
+{
+    Config cfg = load_config("anthropic-messages", ep.base_url());
+    const std::string workdir = (fs::temp_directory_path() / "realagent-ctx-e2e").string();
+    fs::create_directories(workdir);
 
     Frames f;
-    CoreContext ctx{.config = &*cfg,
+    CoreContext ctx{.config = &cfg,
                     .pricing = nullptr,
                     .emit_fn = [&f](const std::string &t, const std::string &) { f.add(t); }};
     ApprovalCoordinator approval;
-    {
-        Agent a(ctx, approval, home.string(), 1);
-        a.post("干活");
-        CHECK(wait_end(f, 1), "第一趟收工（409 重发后恢复）");
+    Agent a(ctx, approval, workdir, 1);
 
-        const std::vector<std::string> bodies1 = ep.bodies();
-        CHECK(bodies1.size() == 3, "三次请求：完整 → 增量(409) → 完整重发");
-        if (bodies1.size() == 3)
-        {
-            const json b0 = json::parse(bodies1[0]);
-            CHECK(b0["revlm_context"].is_object() && b0["revlm_context"].empty() &&
-                      b0["messages"].size() == 1,
-                  "第 1 个请求：revlm_context:{} 带全部消息");
-            const json b1 = json::parse(bodies1[1]);
-            CHECK(b1["revlm_context"].contains("prefix") &&
-                      b1["revlm_context"]["count"] == 2 && b1["messages"].size() == 1,
-                  "第 2 个请求：增量（只带 tool_result 尾部）");
-            const json b2 = json::parse(bodies1[2]);
-            CHECK(b2["revlm_context"].is_object() && b2["revlm_context"].empty() &&
-                      b2["messages"].size() == 3,
-                  "409 后自动重发的是完整体");
-        }
-        const ContextSession::Stats st1 = a.context_session().stats();
-        CHECK(st1.incrementals == 1 && st1.misses == 1 && st1.hits == 0,
-              "统计：一次增量、一次 409 未命中、命中 0");
+    /* 第 1 趟：tool_use → 工具结果 → 文本，两次调用：完整体、增量命中 */
+    a.post("干活");
+    CHECK(wait_end(f, 1), "第 1 趟收工");
+    std::vector<FakeRevlm::Seen> s = since(ep, 0);
+    CHECK(s.size() == 2 && !s[0].delta && s[0].status == 200 && s[1].delta && s[1].status == 200,
+          "第 1 趟：完整体 → 增量（200）");
+    CHECK(a.context_session().stats().hits == 1 && a.context_session().stats().bytes_saved > 0,
+          "增量命中，节省字节 > 0");
 
-        /* 第二趟（同一 Agent）：无 409，增量命中；响应头的错 prefix 不覆盖本地 */
-        a.post("再来");
-        CHECK(wait_end(f, 2), "第二趟收工");
+    /* 第 2 趟：存储被清掉 → 增量 409 revlm_base_miss → 完整重发 */
+    size_t n = ep.seen().size();
+    ep.forget_all();
+    a.post("再来");
+    CHECK(wait_end(f, 2), "第 2 趟收工（base 丢失后恢复）");
+    s = since(ep, n);
+    CHECK(s.size() == 2 && s[0].delta && s[0].status == 409 && !s[1].delta && s[1].status == 200,
+          "第 2 趟：增量 409 → 完整重发 200");
+    CHECK(a.context_session().stats().misses == 1, "统计：一次 miss");
 
-        const std::vector<std::string> bodies = ep.bodies();
-        CHECK(bodies.size() == 4, "第二趟只多一个请求（增量命中，没再重发）");
-        if (bodies.size() == 4)
-        {
-            const json b3 = json::parse(bodies[3]);
-            CHECK(b3["revlm_context"].contains("prefix") && b3["messages"].size() == 1,
-                  "第二趟仍是增量");
+    /* 第 3 趟：重发的完整体被存下，这一趟增量命中 */
+    n = ep.seen().size();
+    a.post("三");
+    CHECK(wait_end(f, 3), "第 3 趟收工");
+    s = since(ep, n);
+    CHECK(s.size() == 1 && s[0].delta && s[0].status == 200, "第 3 趟：增量命中（重发已被存下）");
 
-            /* prefix 本地复算：完整重发体（第 3 个请求）的三条消息 + assistant 回复 */
-            std::vector<std::string> blobs;
-            assemble_full(bodies[2], nullptr, &blobs);
-            rllm::Node n = rllm::root_node();
-            for (const auto &b : blobs)
-                n = rllm::chain_node(n, rllm::blob_hash(boost::json::parse(b)));
-            n = rllm::chain_node(
-                n, rllm::blob_hash(protocol_assistant(
-                       json{{"role", "assistant"},
-                            {"content", json::array({json{{"type", "text"}, {"text", "SECOND_REPLY"}}})}})));
-            CHECK(b3["revlm_context"]["prefix"] == rllm::to_hex(n) &&
-                      b3["revlm_context"]["count"] == 4,
-                  "prefix 仍是本地算的 node(4)——服务端回的全零 prefix 没有覆盖本地");
-        }
-        const ContextSession::Stats st = a.context_session().stats();
-        CHECK(st.incrementals == 2 && st.misses == 1 && st.hits == 1,
-              "统计：两次增量、一次未命中、一次命中");
-    }
-    fs::remove_all(home);
-}
+    /* 第 4 趟：拼装结果与 Expect 不符 → 409 revlm_expect_mismatch → 完整重发 */
+    n = ep.seen().size();
+    ep.corrupt_next_delta();
+    a.post("四");
+    CHECK(wait_end(f, 4), "第 4 趟收工（expect 不符后恢复）");
+    s = since(ep, n);
+    CHECK(s.size() == 2 && s[0].delta && s[0].status == 409 && !s[1].delta && s[1].status == 200,
+          "第 4 趟：增量 409 → 完整重发 200");
 
-static void test_e2e_conflict_resend()
-{
-    printf("[端到端 409 重发：revlm_context_miss]\n");
-    run_conflict_scenario("revlm_context_miss");
-    printf("[端到端 409 重发：revlm_context_mismatch]\n");
-    run_conflict_scenario("revlm_context_mismatch");
+    const ContextSession::Stats st = a.context_session().stats();
+    CHECK(st.requests == 5 && st.deltas == 4 && st.hits == 2 && st.misses == 2,
+          "统计：5 个请求、4 个增量、2 次命中、2 次 miss");
+    fs::remove_all(workdir);
 }
 
 int main()
 {
-    test_full_then_incremental();
-    test_marks_roundtrip();
-    test_fallbacks();
+    test_reconstruction();
+    test_sha256();
+    test_threshold();
+    test_base_advances_only_on_stored();
     test_conflict_detection();
     test_stats();
-    test_e2e_conflict_resend();
+    test_protocols_enabled();
+    {
+        printf("[端到端：h2 假 revlm，走 revlm::net]\n");
+        H2FakeRevlm ep;
+        test_e2e(ep);
+    }
+    {
+        printf("[端到端：只认 HTTP/1.1 的假 revlm，退回 curl]\n");
+        H1FakeRevlm ep;
+        test_e2e(ep);
+    }
     printf(failures ? "\n%d 项失败\n" : "\n全部通过\n", failures);
     return failures ? 1 : 0;
 }

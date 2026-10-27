@@ -12,6 +12,8 @@ endif()
 # macOS 的 libcurl 是系统库（SDK 自带头），FindCURL 会把 SDK usr/include 当 include dir
 # 注入为 isystem——与 brew libc++ 头冲突。因此只取库路径，不用 CURL::libcurl target。
 find_package(CURL REQUIRED)
+# SHA-256（增量上下文协议的请求体指纹）走 OpenSSL EVP，只要 libcrypto。
+find_package(OpenSSL REQUIRED)
 # cpp-httplib（WebSocket 服务端）：header-only，钉一个版本，与 realontext 的 Relay 同。
 # 只在本机回环上说话：TLS 与压缩都不要，对外的 TLS 留给前面的反向代理。
 include(FetchContent)
@@ -31,27 +33,23 @@ FetchContent_MakeAvailable(httplib)
 # 普通 -I，排在每个 -isystem 之前：Homebrew 在 /opt/homebrew/include 装着另一个版本的 httplib.h，不许它先被找到
 set_property(TARGET httplib PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "")
 
-# revlm 共享模块（增量上下文协议的 canonical/哈希链，realurl/llm；两端必须同一份实现，
-# 见 revlm docs/context-cache.md）。只取 realurl 子树——revlm 的 backend 连着 sqlpp11
-# 一整套数据库依赖，core 用不到也不背。
+# revlm::net（revlm 自己的网络层）：连 revlm 走它，其余端点走 curl（llm/transport）。
+# 只取 revlm 的 net/ 子树、不带 server——revlm 的 backend 连着 sqlpp11 一整套数据库依赖，
+# core 用不到也不背。
 #   本地开发：cmake -DREALAGENT_REVLM_SOURCE_DIR=/path/to/revlm
 #   不给：FetchContent GitHub 上的 revlm
 set(REALAGENT_REVLM_SOURCE_DIR "" CACHE PATH "本地 revlm checkout（空 = FetchContent GitHub 仓库）")
-set(REVLM_BUILD_BACKEND OFF CACHE BOOL "" FORCE)
-set(REVLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(REALURL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(REALURL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(REALURL_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+set(REVLM_NET_SERVER OFF CACHE BOOL "" FORCE)
 if(REALAGENT_REVLM_SOURCE_DIR)
-  add_subdirectory(${REALAGENT_REVLM_SOURCE_DIR}/realurl ${CMAKE_CURRENT_BINARY_DIR}/revlm-realurl)
+  add_subdirectory(${REALAGENT_REVLM_SOURCE_DIR}/net ${CMAKE_CURRENT_BINARY_DIR}/revlm-net)
 else()
   FetchContent_Declare(revlm
     GIT_REPOSITORY https://github.com/frevlm/revlm.git
-    # TODO: 等 revlm 推 tag 后钉一个版本号（context_canonical 合入之后）；定版前
-    # 远程路径没有这个模块、编不过，本地开发一律走 REALAGENT_REVLM_SOURCE_DIR。
+    # TODO: 等 revlm 推 tag 后钉一个版本号（net/ 合入之后）；定版前远程路径没有这个
+    # 目录、编不过，本地开发一律走 REALAGENT_REVLM_SOURCE_DIR。
     GIT_TAG master
     GIT_SHALLOW TRUE
-    SOURCE_SUBDIR realurl)
+    SOURCE_SUBDIR net)
   FetchContent_MakeAvailable(revlm)
 endif()
 
@@ -61,6 +59,7 @@ add_library(realagent_core_lib STATIC
   src/proc.cpp
   src/llm/llm.cpp
   src/llm/context_session.cpp
+  src/llm/transport.cpp
   src/llm/upstream/anthropic_messages.cpp
   src/llm/upstream/openai_chat.cpp
   src/llm/upstream/openai_responses.cpp
@@ -87,9 +86,7 @@ add_library(realagent_core_lib STATIC
   src/mcp/hub.cpp
 )
 target_include_directories(realagent_core_lib PUBLIC include)
-target_link_libraries(realagent_core_lib PRIVATE ${CURL_LIBRARIES})
-# PUBLIC：context_session.hpp 把 realurl 的头暴露了出去，测试链 core 库时要找得到
-target_link_libraries(realagent_core_lib PUBLIC realurl::llm)
+target_link_libraries(realagent_core_lib PRIVATE ${CURL_LIBRARIES} OpenSSL::Crypto revlm::net)
 
 add_executable(realagent-core
   src/main.cpp
