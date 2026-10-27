@@ -45,8 +45,7 @@ if(REALAGENT_REVLM_SOURCE_DIR)
 else()
   FetchContent_Declare(revlm
     GIT_REPOSITORY https://github.com/frevlm/revlm.git
-    # TODO: 等 revlm 推 tag 后钉一个版本号（net/ 合入之后）；定版前远程路径没有这个
-    # 目录、编不过，本地开发一律走 REALAGENT_REVLM_SOURCE_DIR。
+    # TODO: 等 revlm 推 tag 后钉一个版本号，不再跟 master。
     GIT_TAG master
     GIT_SHALLOW TRUE
     SOURCE_SUBDIR net)
