@@ -506,6 +506,9 @@ func (m model) panelKey(key string) (model, tea.Cmd) {
 		item := p.items[p.sel]
 		m.panel = nil
 		m.ed.set(item.submit)
+		if item.edit {
+			return m, nil
+		}
 		return m.submitInput(true)
 	}
 	return m, nil
@@ -898,7 +901,7 @@ func renderModels(data json.RawMessage) string {
 		return describeCommand("model")
 	}
 	if len(list) == 0 {
-		return "✅ /model: 无模型清单（模型数据表是空的）"
+		return "✅ /model: 端点没报任何模型（手动指定：/model <模型名>）"
 	}
 	var out []string
 	for _, m := range list {

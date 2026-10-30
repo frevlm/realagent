@@ -17,7 +17,8 @@ namespace fs = std::filesystem;
 
 std::optional<Protocol> protocol_from(std::string_view name)
 {
-    if (name == "anthropic-messages") return Protocol::AnthropicMessages;
+    // revlm 对外说 anthropic-messages；区别只在传输与增量上下文，见 context_protocol_enabled
+    if (name == "revlm" || name == "anthropic-messages") return Protocol::AnthropicMessages;
     if (name == "openai-chat") return Protocol::OpenAiChat;
     if (name == "openai-responses") return Protocol::OpenAiResponses;
     return std::nullopt;
@@ -48,24 +49,24 @@ std::string endpoint_config_error(const Config &cfg)
             if (i) out += "、";
             out += missing[i];
         }
-        out += "。这三个键没有默认值——填错产生的报错最难诊断，所以宁可现在拦住你。";
+        out += "。";
     }
     else
     {
         out = "配置里的 protocol=\"" + bad_protocol + "\" 不认识。";
     }
-    out += "\nprotocol 只有三个值：anthropic-messages / openai-chat / openai-responses。";
+    out += "\nprotocol 只有四个值：revlm（默认）/ anthropic-messages / openai-chat / openai-responses。";
     out += "\n往 ~/.realagent/settings.json 里写（照抄改值即可）：\n";
     out += R"({
-  "protocol": "anthropic-messages",
-  "base_url": "https://api.deepseek.com/anthropic",
-  "model": "deepseek-v4-flash",
-  "api_key": "sk-你的密钥"
+  "protocol": "revlm",
+  "base_url": "https://www.revlm.com",
+  "model": "token 渠道组里的模型名",
+  "api_key": "你的 revlm token"
 })";
     return out;
 }
 
-/* ==================== 首启引导拉模型清单（POST /setup/models）==================== */
+/* ==================== 拉端点的模型清单（POST /setup/models、/model）==================== */
 
 static size_t append_body(char *p, size_t size, size_t n, void *out)
 {
@@ -73,11 +74,11 @@ static size_t append_body(char *p, size_t size, size_t n, void *out)
     return size * n;
 }
 
-std::expected<std::vector<std::string>, std::string> setup_models(const nlohmann::json &in)
+std::expected<std::vector<std::string>, std::string> endpoint_models(const nlohmann::json &in)
 {
     const std::string key = in.value("api_key", std::string());
     // anthropic-messages 的路径带 /v1、多两个头；另两套同属 OpenAI 一家，清单端点相同
-    const bool anthropic = in.value("protocol", std::string()) == "anthropic-messages";
+    const bool anthropic = protocol_from(in.value("protocol", std::string())) == Protocol::AnthropicMessages;
     const std::string url = in.value("base_url", std::string()) + (anthropic ? "/v1/models?limit=1000" : "/models");
     std::vector<std::string> headers{"Authorization: Bearer " + key};
     if (anthropic) headers.insert(headers.end(), {"x-api-key: " + key, "anthropic-version: 2023-06-01"});
@@ -91,7 +92,7 @@ std::expected<std::vector<std::string>, std::string> setup_models(const nlohmann
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_body);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 引导页在等它，拉不到就让用户手填
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 有人在等它，拉不到就让用户手填
     const CURLcode rc = curl_easy_perform(curl);
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
@@ -145,9 +146,7 @@ HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog)
 
 bool context_protocol_enabled(const Config &cfg)
 {
-    // 开关默认关；协议是字节级的，三种上游协议都能用
-    const nlohmann::json flag = cfg.get_json("revlm_context");
-    return flag.is_boolean() && flag.get<bool>();
+    return cfg.get("protocol") == "revlm";
 }
 
 /* ==================== 下行：切块 + 派发 ==================== */

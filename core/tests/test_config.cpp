@@ -90,9 +90,10 @@ int main()
         CHECK(none.has_value() && none->get("permission") == "ask",
               "有默认值的键取到默认");
         CHECK(none.has_value() && none->get("model").empty(),
-              "端点那一束没有默认值（ADR-0017）：model 是空的，不替用户猜一个");
-        CHECK(none.has_value() && none->get("base_url").empty(), "base_url 同上");
-        CHECK(none.has_value() && none->get("protocol").empty(), "protocol 同上");
+              "model 没有默认值：可用模型取决于 token 绑的渠道组，不替用户猜一个");
+        CHECK(none.has_value() && none->get("base_url") == "https://www.revlm.com",
+              "base_url 默认是 revlm 生产实例（ADR-0030）");
+        CHECK(none.has_value() && none->get("protocol") == "revlm", "protocol 默认 revlm");
 
         write_settings(home, "{}");
         const auto empty = Config::load();
@@ -163,7 +164,7 @@ int main()
         {
             CHECK(r->model(ModelTier::Main) == "m-only", "文件里的键生效");
             CHECK(r->get("permission") == "ask", "没提及的默认键原样在，不被顶层替换带走");
-            CHECK(r->get("base_url").empty(),
+            CHECK(r->get("small_model").empty(),
                   "没提及、也没有默认值的键就是空——不是丢了默认，是本来就没有");
         }
     }

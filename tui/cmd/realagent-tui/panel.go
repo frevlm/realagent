@@ -21,6 +21,7 @@ type panelItem struct {
 	label  string // 展示文本（不含标记与光标）
 	mark   bool   // 当前生效项（● 标记，打开时高亮落在这里）
 	submit string // 确认时提交的整条输入，如 "/model gpt-5"
+	edit   bool   // 确认时只把 submit 填进输入框，等用户补完再发（手动输入模型名）
 }
 
 // panel 是打开着的子面板。approval 是模态，panel 也是：开着时按键只喂它。
@@ -41,7 +42,7 @@ func makePanel(command string, data json.RawMessage) *panel {
 // modelPanel 把 /model 的模型清单做成选择面板：Enter = 切主模型
 func modelPanel(data json.RawMessage) *panel {
 	var list []client.ModelInfo
-	if err := json.Unmarshal(data, &list); err != nil || len(list) == 0 {
+	if err := json.Unmarshal(data, &list); err != nil {
 		return nil
 	}
 	p := &panel{title: "选择主模型"}
@@ -55,6 +56,7 @@ func modelPanel(data json.RawMessage) *panel {
 		}
 		p.items = append(p.items, panelItem{label: text, mark: mi.Current, submit: "/model " + mi.Name})
 	}
+	p.items = append(p.items, panelItem{label: manualItem, submit: "/model ", edit: true})
 	p.sel = p.markIndex()
 	return p
 }

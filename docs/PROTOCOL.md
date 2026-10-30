@@ -141,8 +141,9 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 ## 配置没配齐
 
 `POST /message` 在端点那一束（`protocol` / `base_url` / `model`）缺键时不启动 agent，
-直接回 `{"error": "<多行人话>"}`：缺哪个报哪个、列出 `protocol` 的三个可选值、
-附一段能直接抄的 `settings.json`（ADR-0017）。
+直接回 `{"error": "<多行人话>"}`：缺哪个报哪个、列出 `protocol` 的四个可选值、
+附一段能直接抄的 `settings.json`（ADR-0017）。`protocol` / `base_url` 默认指向 revlm（ADR-0030），
+所以默认配置下缺的只有 `model`。
 
 core **不会**因为配置没配齐而拒绝启动——那样客户端只会看见"连不上"，比配错了更难查。
 

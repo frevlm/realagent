@@ -69,8 +69,11 @@ func TestModelPanel(t *testing.T) {
 	if p == nil {
 		t.Fatal("modelPanel 返回 nil")
 	}
-	if len(p.items) != 2 {
-		t.Fatalf("items = %d, want 2", len(p.items))
+	if len(p.items) != 3 {
+		t.Fatalf("items = %d, want 3（两个模型 + 手动输入）", len(p.items))
+	}
+	if last := p.items[2]; !last.edit || last.submit != "/model " {
+		t.Errorf("末项应是手动输入: %+v", last)
 	}
 	if p.sel != 1 {
 		t.Errorf("sel = %d, want 1（current 项）", p.sel)
@@ -100,10 +103,10 @@ func TestSessionPanel(t *testing.T) {
 	}
 }
 
-// 无数据造不出面板：退回文本输出，不是新的失败点
+// 端点一个模型都没报：面板只剩手动输入；坏载荷造不出面板，退回文本输出
 func TestMakePanelEmpty(t *testing.T) {
-	if p := makePanel("model", json.RawMessage(`[]`)); p != nil {
-		t.Error("空清单不该开面板")
+	if p := makePanel("model", json.RawMessage(`[]`)); p == nil || len(p.items) != 1 || !p.items[0].edit {
+		t.Errorf("空清单应只剩手动输入: %+v", p)
 	}
 	if p := makePanel("model", json.RawMessage(`{`)); p != nil {
 		t.Error("坏载荷不该开面板")
@@ -147,11 +150,12 @@ func TestPanelNav(t *testing.T) {
 	m := testModel()
 	m.panel = modelPanel(modelsJSON())
 	m, _ = m.panelKey("down")
+	m, _ = m.panelKey("down")
 	if m.panel.sel != 0 {
 		t.Errorf("down 未从末项绕回首项: sel = %d", m.panel.sel)
 	}
 	m, _ = m.panelKey("up")
-	if m.panel.sel != 1 {
+	if m.panel.sel != 2 {
 		t.Errorf("up 未绕回末项: sel = %d", m.panel.sel)
 	}
 	m, _ = m.panelKey("esc")
@@ -177,6 +181,20 @@ func TestPanelEnterSubmits(t *testing.T) {
 	}
 	if m.panelWant != "" {
 		t.Errorf("panelWant = %q, want 空（换完即走）", m.panelWant)
+	}
+}
+
+// 手动输入：Enter 只把 "/model " 填进输入框，不发
+func TestPanelEnterManual(t *testing.T) {
+	m := testModel()
+	m.panel = modelPanel(modelsJSON())
+	m.panel.sel = len(m.panel.items) - 1
+	m, cmd := m.panelKey("enter")
+	if m.panel != nil || cmd != nil {
+		t.Error("应关面板、不发请求")
+	}
+	if m.ed.value() != "/model " {
+		t.Errorf("输入框 = %q, want \"/model \"", m.ed.value())
 	}
 }
 

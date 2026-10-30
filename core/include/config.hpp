@@ -2,7 +2,7 @@
  * config.hpp — 配置：代码里的默认树打底，~/.realagent/settings.json 逐键覆盖（ADR-0010）
  *
  * 启动读一次，不热重载。只有 settings.json 存在但不是合法 JSON 时 load 失败。
- * 端点那一束（protocol / base_url / model）没有默认值，理由见 llm.hpp。
+ * protocol / base_url 默认指向 revlm（ADR-0030）；model 没有默认值。
  * 两档模型（model / small_model）共用 base_url 与 api_key，档位间不回落。
  * 线程安全：内部 mutex 护配置树。
  */
@@ -17,6 +17,9 @@
 #include "json.hpp"
 
 namespace realagent {
+
+/* revlm 生产实例：protocol=revlm 的默认 base_url，首启引导选 revlm 时也写这个 */
+inline constexpr std::string_view kRevlmBaseUrl = "https://www.revlm.com";
 
 enum class ModelTier {
     Main, // 对话主链路

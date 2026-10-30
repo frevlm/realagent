@@ -502,22 +502,27 @@ async function openModelMenu() {
   if (!menu.hidden) return void (menu.hidden = true);
   menu.innerHTML = '<div class="menu-empty">读取中…</div>';
   menu.hidden = false;
+  // 清单是 core 现拉的端点 /v1/models；拉不到就只剩底部的手动输入
   const r = await call<Reply<Model[]>>("POST", "/command", { command: "/model" });
-  if (!r.ok) { menu.hidden = true; return toast(r.error || "读不到模型清单"); }
+  if (!r.ok) toast(r.error || "读不到模型清单");
   menu.textContent = "";
-  if (!r.data?.length) menu.innerHTML = '<div class="menu-empty">模型数据表是空的</div>';
+  const pick = async (name: string) => {
+    menu.hidden = true;
+    const x = await call<Reply>("POST", "/command", { command: "/model " + name });
+    if (!x.ok) toast(x.error || "切换失败");
+  };
   for (const m of r.data ?? []) {
     const b = el("button", "menu-item model-item",
       `<span class="check">${m.current ? ic("check") : ""}</span><span class="grow mono"></span><span class="text-3"></span>`);
     q(b, ".grow").textContent = m.name;
     q(b, ".text-3").textContent = m.owned_by ?? "";
-    b.onclick = async () => {
-      menu.hidden = true;
-      const x = await call<Reply>("POST", "/command", { command: "/model " + m.name });
-      if (!x.ok) toast(x.error || "切换失败");
-    };
+    b.onclick = () => pick(m.name);
     menu.append(b);
   }
+  const input = el("input", "form-control mono");
+  input.placeholder = "手动输入模型名，Enter 切换";
+  input.onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing && input.value.trim()) pick(input.value.trim()); };
+  menu.append(input);
 }
 
 // ==================== 输入框与斜杠菜单 ====================

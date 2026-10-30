@@ -272,7 +272,7 @@ static Config load_config(const std::string &protocol, const std::string &base_u
     const fs::path home = fs::temp_directory_path() / ("realagent_ctxsess_home_" + protocol);
     fs::remove_all(home);
     fs::create_directories(home / ".realagent");
-    json s{{"protocol", protocol}, {"base_url", base_url}, {"api_key", "k"}, {"model", "m-test"}, {"permission", "allow-all"}, {"revlm_context", true}};
+    json s{{"protocol", protocol}, {"base_url", base_url}, {"api_key", "k"}, {"model", "m-test"}, {"permission", "allow-all"}};
     std::ofstream(home / ".realagent" / "settings.json") << s.dump();
     ::setenv("HOME", home.c_str(), 1);
     auto cfg = Config::load();
@@ -286,11 +286,11 @@ static Config load_config(const std::string &protocol, const std::string &base_u
 
 static void test_protocols_enabled()
 {
-    printf("[三种协议都启用]\n");
-    for (const char *p : {"anthropic-messages", "openai-chat", "openai-responses"})
+    printf("[只有 protocol=revlm 启用]\n");
+    for (const char *p : {"revlm", "anthropic-messages", "openai-chat", "openai-responses"})
     {
         const Config cfg = load_config(p, "http://127.0.0.1:9");
-        CHECK(context_protocol_enabled(cfg), p);
+        CHECK(context_protocol_enabled(cfg) == (std::string_view(p) == "revlm"), p);
     }
 }
 
@@ -519,7 +519,7 @@ static std::vector<FakeRevlm::Seen> since(const FakeRevlm &ep, size_t from)
 
 static void test_e2e(FakeRevlm &ep)
 {
-    Config cfg = load_config("anthropic-messages", ep.base_url());
+    Config cfg = load_config("revlm", ep.base_url());
     const std::string workdir = (fs::temp_directory_path() / "realagent-ctx-e2e").string();
     fs::create_directories(workdir);
 

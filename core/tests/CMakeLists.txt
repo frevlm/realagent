@@ -14,6 +14,8 @@ endforeach()
 # context_session 的端到端要两个假 revlm 当对手：h2c 的（revlm::net 那条路）与只认
 # HTTP/1.1 的 httplib（退回 curl 那条路）
 target_link_libraries(test_context_session PRIVATE httplib::httplib revlm::net_test_server)
+# llm 的模型清单要一个本机假端点
+target_link_libraries(test_llm PRIVATE httplib::httplib)
 
 # 测试二进制不在 realagent-core 旁边，PATH 照 core 启动时那样补上内置的 realontext
 set_tests_properties(tools PROPERTIES

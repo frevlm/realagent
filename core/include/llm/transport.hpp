@@ -4,7 +4,7 @@
  * 两条路，签名相同：
  *   post_revlm  revlm::net（revlm 自己的网络层：h2 / h2c / realurl/1），只用来连 revlm
  *   post_curl   libcurl，什么端点都能连
- * 连 revlm（配置开了 revlm_context）走 post_revlm，其余走 post_curl。对面说不了 h2
+ * 连 revlm（protocol=revlm）走 post_revlm，其余走 post_curl。对面说不了 h2
  * （例如 revlm 前面挡着只认 HTTP/1.1 的反向代理）时 post_revlm 在拿到响应头之前就失败：
  * 建连失败，或对面回的第一帧就不合 h2——请求没被当成请求处理过，同一个请求退回 post_curl。
  */

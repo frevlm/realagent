@@ -279,7 +279,9 @@ _Avoid_: `fast model`、`模型 profile`（档位不带端点凭证，不构成�
 
 ### **Protocol（协议）**:
 
-对面那个端点说哪套话。core 支持三套，由用户在配置里明选（ADR-0017）：`anthropic-messages` / `openai-chat` / `openai-responses`。协议**不是公司**——`anthropic-messages` 由 Anthropic、DeepSeek、OpenRouter 等多家实现，`openai-chat` 的实现者更多。
+对面那个端点说哪套话。core 支持三套（ADR-0017）：`anthropic-messages` / `openai-chat` / `openai-responses`。协议**不是公司**——`anthropic-messages` 由 Anthropic、DeepSeek、OpenRouter 等多家实现，`openai-chat` 的实现者更多。
+
+配置里还有第四个名字 `revlm`，也是默认值（ADR-0030）：请求体与帧就是 `anthropic-messages`，只是传输换成 revlm::net 并启用增量上下文协议。它说的是「对面是 revlm」，不是第四套线上格式。
 
 一套协议包含四样共变的东西：**认证头、URL 路径、请求体形状、响应帧结构**（外加 token 字段名）。它们绑成一束由一个 `protocol` 值选定，不拆成四个开关——拆开就能配出无效组合（Bearer 头配 OpenAI 请求体配 `/v1/messages` 路径）。
 
@@ -289,7 +291,7 @@ _Avoid_: `anthropic api`（Anthropic 是一家公司，协议本身供应商中�
 
 ### **端点束（Endpoint Bundle）**:
 
-`protocol` / `base_url` / `model` 三个配置键的合称。**它们没有默认值，必须用户填**（ADR-0017）：不填完全用不了，而填错产生的报错（端点 404、请求体形状不认、流解析出空）是最难自己诊断的一类——给默认值等于替用户猜，猜错了他还以为是自己配的。
+`protocol` / `base_url` / `model` 三个配置键的合称。`protocol` / `base_url` 默认指向 revlm 生产实例（`revlm` / `https://www.revlm.com`，ADR-0030）——两头都是我们的，不是猜。**`model` 没有默认值，必须用户填**：可用模型取决于 token 绑的渠道组。连第三方端点时三个键都由用户填（ADR-0017）：填错产生的报错（端点 404、请求体形状不认、流解析出空）是最难自己诊断的一类。
 
 缺键不让 core 退出（core 一退，TUI 只会说「连不上」，更难诊断），而是启动日志喊一遍 + 任何一次 `POST /message` 原样回那段话：缺哪个报哪个、一次报全、附可直接抄的样例。
 
@@ -460,7 +462,7 @@ _Avoid_: `reasoning_content`（DeepSeek 原生 API 字段名，Anthropic 兼容�
 
 同一个模型有多条到达路径（DeepSeek 直连 / OpenRouter / 内网中转），上下文窗口相同但端点、凭证、单价各异。这不构成冲突：**一次运行只有一个 `base_url`**，表里配的就是这条路径的价。换路径就换 `base_url`，要换价就换表。
 
-core 不校验用户配的模型名在不在表里——**表是参考资料，不是白名单**：配了表外的模型照发不误，不检查、不警告、不兜底（只是算不出钱）。`/model` 交互式选择是另一回事，那里只能从已知的里挑。
+core 不校验用户配的模型名在不在表里——**表是参考资料，不是白名单**：配了表外的模型照发不误，不检查、不警告、不兜底（只是算不出钱）。`/model` 也一样：清单是 core 现拉的端点 `GET /v1/models`（引导页同一个函数 `endpoint_models`），表只给清单里认得的模型补 `owned_by` / `context`；`/model <名字>` 不查清单，拉不到清单时手填就是退路（ADR-0030）。
 
 _Avoid_: `模型清单`（指单个模型时）、`provider model`
 
@@ -512,7 +514,7 @@ _Avoid_: `scrollback`（终端的那条 buffer 已不再承载会话历史）
 
 ### **子面板（Panel）**:
 
-斜杠命令的第二层选择（参考 codex cli）：`/model` `/resume` `/statusline` 无参执行后，用同一份结果载荷开一列可选项——↑/↓ 选择、Enter 确认、Esc 取消，模态（开着时按键只喂它）。**确认 = 把该项的整条命令写进输入框走正常提交**，没有第二套提交路径；面板也不新增端点，数据就是命令回包里的 `data`。造不出面板（无数据/坏载荷）就退回文本清单。
+斜杠命令的第二层选择（参考 codex cli）：`/model` `/resume` `/statusline` 无参执行后，用同一份结果载荷开一列可选项——↑/↓ 选择、Enter 确认、Esc 取消，模态（开着时按键只喂它）。**确认 = 把该项的整条命令写进输入框走正常提交**，没有第二套提交路径；面板也不新增端点，数据就是命令回包里的 `data`。造不出面板（坏载荷）就退回文本清单。`/model` 面板末项固定是「手动输入…」：确认只把 `/model ` 填进输入框，等用户补完模型名再发。
 
 ### ~~**定型（Freeze）**~~ —— 已作废（[[ADR-0020]]，2026-08-28）:
 

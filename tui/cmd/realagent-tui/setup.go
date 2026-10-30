@@ -1,6 +1,6 @@
 // 首启引导：settings.json 里 setup_done 不为 true（或 `realagent-tui setup`）时，进主界面前先走一遍。
 //
-// 一页一项：protocol → base_url → api_key → model → small_model，现值预填。
+// 一页一项：protocol → base_url → api_key → model → small_model，现值预填；选 revlm 跳过 base_url。
 // 模型两页先拉端点的模型清单（POST /setup/models）给人选，选「手动输入…」或拉不到就手填。
 // 写盘归 core（POST /setup），它的内存同步更新，走完直接进主界面。Esc 回上一页，第一页 Esc 跳过。
 package main
@@ -14,7 +14,7 @@ import (
 	"realagent/tui/internal/client"
 )
 
-var protocols = []string{"anthropic-messages", "openai-chat", "openai-responses"}
+var protocols = []string{"revlm", "anthropic-messages", "openai-chat", "openai-responses"}
 
 const (
 	stepProtocol = iota
@@ -25,9 +25,9 @@ const (
 )
 
 var setupSteps = [...]struct{ name, hint string }{
-	{"protocol", "端点说哪种协议：Anthropic 原厂及其兼容端点选 anthropic-messages"},
+	{"protocol", "连 revlm 选 revlm（默认，不用填地址）；第三方：Anthropic 原厂及其兼容端点选 anthropic-messages"},
 	{"base_url", "anthropic-messages 不带 /v1（https://api.anthropic.com）；openai-* 带到 /v1（https://api.openai.com/v1）"},
-	{"api_key", "端点的 API key"},
+	{"api_key", "端点的 API key（revlm 没有 OAuth：填 www.revlm.com 控制台里建的 token）"},
 	{"model", "对话用的主模型"},
 	{"small_model", "收工判定用的小模型；手动输入留空 = 不做收工判定"},
 }
@@ -76,13 +76,11 @@ func (m setupModel) choices() []string {
 	return nil
 }
 
-// enter 进入某一页：高亮落在现值上；模型页现值不在清单里、或清单是空的，就直接手填
+// enter 进入某一页：高亮落在现值上；模型页清单是空的就直接手填
 func (m setupModel) enter(step int) setupModel {
 	m.step, m.manual = step, false
-	cur := strings.TrimSpace(m.eds[step].value())
-	i := slices.Index(m.choices(), cur)
-	m.sel = max(i, 0)
-	m.manual = step >= stepModel && !m.loading && i < 0 && (cur != "" || len(m.models) == 0)
+	m.sel = max(slices.Index(m.choices(), strings.TrimSpace(m.eds[step].value())), 0)
+	m.manual = step >= stepModel && !m.loading && len(m.models) == 0
 	return m
 }
 
@@ -117,7 +115,7 @@ func (m setupModel) key(v tea.KeyMsg) (setupModel, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.loading, m.note = false, ""
-		return m.enter(m.step - 1), nil
+		return m.enter(m.neighbor(-1)), nil
 	case "enter":
 		if m.loading {
 			return m, nil
@@ -170,7 +168,16 @@ func (m setupModel) confirm() (setupModel, tea.Cmd) {
 	case stepSmallModel:
 		return m, func() tea.Msg { return setupSaved{err: c.ApplySetup(s)} }
 	}
-	return m.enter(m.step + 1), nil
+	return m.enter(m.neighbor(1)), nil
+}
+
+// neighbor：前一页（d=-1）或后一页（d=1）。revlm 没有 base_url 页，地址由 core 填
+func (m setupModel) neighbor(d int) int {
+	s := m.step + d
+	if s == stepBaseURL && m.values().Protocol == "revlm" {
+		s += d
+	}
+	return s
 }
 
 func (m setupModel) View() string {

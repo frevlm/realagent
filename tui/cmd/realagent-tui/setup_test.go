@@ -31,7 +31,7 @@ func fetched(m setupModel, list []string, err error) setupModel {
 
 func TestSetupStepsInOrder(t *testing.T) {
 	m := newSetupModel(nil, client.Setup{})
-	m = press(m, kDown, kEnter, kType("http://x/v1"), kEnter, kType("sk-1"), kEnter)
+	m = press(m, kDown, kDown, kEnter, kType("http://x/v1"), kEnter, kType("sk-1"), kEnter)
 	if m.step != stepModel || !m.loading {
 		t.Fatalf("api_key 之后应进模型页拉清单，step=%d loading=%v", m.step, m.loading)
 	}
@@ -41,6 +41,18 @@ func TestSetupStepsInOrder(t *testing.T) {
 	want := client.Setup{Protocol: "openai-chat", BaseURL: "http://x/v1", APIKey: "sk-1", Model: "b", SmallModel: "own"}
 	if got := m.values(); got != want {
 		t.Fatalf("走完 = %+v，想要 %+v", got, want)
+	}
+}
+
+// revlm 没有 base_url 页：协议页 → api_key 页，Esc 也直接回协议页
+func TestSetupRevlmSkipsBaseURL(t *testing.T) {
+	m := newSetupModel(nil, client.Setup{})
+	m = press(m, kEnter)
+	if m.step != stepAPIKey {
+		t.Fatalf("选 revlm 后应到 api_key 页，step=%d", m.step)
+	}
+	if m, _ = m.key(tea.KeyMsg{Type: tea.KeyEsc}); m.step != stepProtocol {
+		t.Fatalf("Esc 应回协议页，step=%d", m.step)
 	}
 }
 

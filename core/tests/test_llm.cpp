@@ -1,16 +1,19 @@
 /*
- * test_llm.cpp — llm 模块单元测试（不碰网络）
+ * test_llm.cpp — llm 模块单元测试（网络只到本机的假端点）
  *
  *   build_request         : 抽象对话 → 三套协议各自的请求形状与认证头
  *   SseParser             : SSE → 事件（三套协议各自的帧结构，产出同一套事件词汇）
  *   endpoint_config_error : 端点那一束缺键/协议名写错 → 人话（ADR-0017）
  *   http_status_error     : 4xx/5xx → 人话，绝不当成"内容为空的成功"
  *   Pricing               : token 用量 → 钱；models() 不报单价
+ *   /model                : 清单来自端点 GET /v1/models；切换不查清单（手填）
  *
  * 从前这里要 dlopen 两个容器、装一个假 host、手工按能力键取函数指针（ADR-0016 前）。
  * 现在就是调几个函数。
  */
 #include "llm/llm.hpp"
+
+#include <httplib.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -18,7 +21,11 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "agent/command.hpp"
+#include "agent/context.hpp"
 
 using namespace realagent;
 using nlohmann::json;
@@ -291,7 +298,7 @@ static void test_endpoint_config_error()
         CHECK(endpoint_config_error(cfg).empty(), "三个键齐全 → 无错");
     }
     {
-        // 只配 api_key：三个必填键一个都没有
+        // 只配 api_key：protocol / base_url 取 revlm 默认，只缺 model
         static std::string home = (fs::temp_directory_path() / "realagent_cfgerr_home").string();
         fs::remove_all(home);
         fs::create_directories(home + "/.realagent");
@@ -303,13 +310,11 @@ static void test_endpoint_config_error()
         const auto cfg = Config::load();
         CHECK(cfg.has_value(), "缺必填键不影响 load 本身（load 只管 JSON 读不读得懂）");
         const std::string e = endpoint_config_error(*cfg);
-        CHECK(e.find("protocol") != std::string::npos, "报错点名 protocol");
-        CHECK(e.find("base_url") != std::string::npos, "报错点名 base_url");
-        CHECK(e.find("model") != std::string::npos, "缺的三个一次报全，不是报一个改一个");
-        CHECK(e.find("anthropic-messages") != std::string::npos &&
+        CHECK(e.find("必填键：model。") != std::string::npos, "只点名缺的 model");
+        CHECK(e.find("revlm") != std::string::npos && e.find("anthropic-messages") != std::string::npos &&
                   e.find("openai-chat") != std::string::npos &&
                   e.find("openai-responses") != std::string::npos,
-              "把三个可选值都列出来");
+              "把四个可选值都列出来");
         CHECK(e.find("settings.json") != std::string::npos, "附可直接抄的样例");
     }
     {
@@ -654,6 +659,52 @@ static void test_parse_openai_responses_failed()
     CHECK(!c.ok, "response.failed → feed 返回 false（HTTP 是 200，但这次调用没成）");
 }
 
+/* —— 5. 端点的模型清单（引导页与 /model 共用）—— */
+static void test_endpoint_models()
+{
+    printf("[endpoint_models + /model]\n");
+    // anthropic 线格式拉 <base>/v1/models；openai 的 base 带 /v1，拉的也是这里
+    httplib::Server svr;
+    svr.Get("/v1/models", [](const httplib::Request &rq, httplib::Response &rs) {
+        if (rq.get_header_value("Authorization") != "Bearer sk-ok")
+        {
+            rs.status = 401;
+            rs.set_content(R"({"error":{"message":"bad key"}})", "application/json");
+            return;
+        }
+        rs.set_content(R"({"object":"list","data":[{"id":"zeta-1"},{"id":"alpha-2"}]})", "application/json");
+    });
+    const int port = svr.bind_to_any_port("127.0.0.1");
+    std::thread th([&svr] { svr.listen_after_bind(); });
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    const auto revlm = endpoint_models({{"protocol", "revlm"}, {"base_url", base}, {"api_key", "sk-ok"}});
+    CHECK(revlm && *revlm == std::vector<std::string>({"alpha-2", "zeta-1"}), "revlm 拉 <base>/v1/models，按名排序");
+
+    // /model（openai-chat）：清单来自端点，模型表只补 owned_by / context
+    Config cfg = make_config(base + "/v1", "sk-ok", R"([{"name":"alpha-2","owned_by":"acme","context":131072,
+       "pricing":{"input":1,"output":1}}])",
+                             "openai-chat");
+    std::string err;
+    const Pricing pricing = Pricing::load(cfg, &err);
+    CoreContext ctx{.config = &cfg, .pricing = &pricing};
+    const json list = json::parse(run_command(ctx, "", nullptr, "/model").reply);
+    CHECK(list["ok"] == true && list["data"].size() == 2 && list["data"][0]["name"] == "alpha-2" &&
+              list["data"][0]["owned_by"] == "acme" && list["data"][1]["name"] == "zeta-1",
+          "/model 列端点的模型，表里有的补上 owned_by");
+
+    const json sw = json::parse(run_command(ctx, "", nullptr, "/model hand-typed").reply);
+    CHECK(sw["ok"] == true && cfg.model(ModelTier::Main) == "hand-typed", "/model <名字> 不查清单，手填即生效");
+
+    cfg.persist("api_key", "nope");
+    const std::string fail = json::parse(run_command(ctx, "", nullptr, "/model").reply).value("error", "");
+    CHECK(fail.find("HTTP 401：bad key") != std::string::npos && fail.find("/model <模型名>") != std::string::npos,
+          "拉不到清单：报原因并指路手填");
+
+    svr.stop();
+    th.join();
+}
+
 int main()
 {
     test_build_request();
@@ -677,6 +728,7 @@ int main()
     test_pricing();
     test_pricing_factory();
     test_pricing_bad_table();
+    test_endpoint_models();
     printf(failures ? "\n%d 项失败\n" : "\n全部通过\n", failures);
     return failures ? 1 : 0;
 }

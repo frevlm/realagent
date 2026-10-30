@@ -5,7 +5,7 @@
  *        upstream/<协议>.cpp                         downstream/<协议>.cpp
  *
  * 一个协议在一个方向上的全部知识（认证头、路径、体形状、帧结构、token 字段名）住在
- * 一个文件里：拆成独立开关就能配出无效组合。协议由用户选，没有默认、不从 URL 猜。
+ * 一个文件里：拆成独立开关就能配出无效组合。协议不从 URL 猜；默认 revlm（ADR-0030）。
  *
  * 事件词汇只有一套：thinking_start / thinking_update / thinking_signature / thinking_stop /
  * message_update / tool_use / usage / stop。usage 的字段统一叫 input / output / cache_read /
@@ -37,15 +37,15 @@ enum class Protocol { AnthropicMessages,
                       OpenAiChat,
                       OpenAiResponses };
 
-/* 配置字符串 → 协议。认不出返回 nullopt。 */
+/* 配置字符串 → 协议。"revlm" 的请求体与帧就是 anthropic-messages。认不出返回 nullopt。 */
 std::optional<Protocol> protocol_from(std::string_view name);
 
 /* protocol / base_url / model 配齐了返回空串；否则返回一段人话，附一段可照抄的配置。 */
 std::string endpoint_config_error(const Config &cfg);
 
-/* 首启引导（POST /setup/models）：按 {protocol, base_url, api_key} 拉端点的模型 id，按名排序。
- * 拉不到返回人话，客户端退回手动输入。 */
-std::expected<std::vector<std::string>, std::string> setup_models(const nlohmann::json &in);
+/* 按 {protocol, base_url, api_key} 拉端点的模型 id（GET /v1/models 或 /models），按名排序。
+ * 首启引导（POST /setup/models）与 /model 共用。拉不到返回人话，客户端退回手动输入。 */
+std::expected<std::vector<std::string>, std::string> endpoint_models(const nlohmann::json &in);
 
 /* 非 2xx 时的人话错误（能从 body 里捞出 message 就捞）。status 0 = 没拿到响应，返回空串。 */
 std::string http_status_error(long status, const std::string &body);
@@ -66,8 +66,8 @@ HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog);
 /* anthropic-messages：一条抽象消息的 content 块 → /v1/messages 块。 */
 nlohmann::json anthropic_content_blocks(const nlohmann::json &message);
 
-/* 增量上下文协议（ContextSession）是否启用：配置开关打开即可，与上游协议无关
- * （字节级协议）。开关默认关，revlm 端也要开才生效。 */
+/* 对面是不是 revlm（protocol=revlm）：是则走增量上下文协议（ContextSession）与 revlm::net。
+ * revlm 端没开上下文缓存时不回 X-Revlm-Stored，客户端一直发完整体，照样能用。 */
 bool context_protocol_enabled(const Config &cfg);
 
 /* payload 只在回调内有效 */

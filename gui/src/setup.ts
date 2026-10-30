@@ -1,6 +1,6 @@
 // 首启引导（同 TUI 的 setup.go）：setup_done 不为 true（或 make setup-*）时，进主界面前先走一遍。
 //
-// 一页一项：protocol → base_url → api_key → model → small_model，现值预填。
+// 一页一项：protocol → base_url → api_key → model → small_model，现值预填；选 revlm 跳过 base_url。
 // 模型两页先拉端点的模型清单（POST /setup/models）给人选，选「手动输入…」或拉不到就手填。
 // 写盘归 core（POST /setup），走完直接进主界面。Esc / 上一步 回上一页，第一页是跳过。
 
@@ -16,13 +16,13 @@ export interface Settings {
   small_model?: string;
 }
 
-const PROTOCOLS = ["anthropic-messages", "openai-chat", "openai-responses"];
+const PROTOCOLS = ["revlm", "anthropic-messages", "openai-chat", "openai-responses"];
 const MANUAL = "手动输入…";
 // 说明里 `反引号` 包住的是标识符与地址：等宽、不在连字符处断行
 const STEPS = [
-  ["protocol", "协议", "端点说哪种协议。Anthropic 原厂及其兼容端点选 `anthropic-messages`。"],
+  ["protocol", "协议", "连 revlm 选 `revlm`（默认，不用填地址）。第三方：Anthropic 原厂及其兼容端点选 `anthropic-messages`。"],
   ["base_url", "端点地址", "`anthropic-messages` 不带 /v1，如 `https://api.anthropic.com`；`openai-*` 带到 /v1，如 `https://api.openai.com/v1`。"],
-  ["api_key", "API key", "端点的 API key。"],
+  ["api_key", "API key", "端点的 API key（revlm 没有 OAuth：填 `www.revlm.com` 控制台里建的 token）。"],
   ["model", "主模型", "对话用的模型。"],
   ["small_model", "小模型", "收工判定用的模型。手动输入并留空 = 不做收工判定。"],
 ] as const;
@@ -42,18 +42,21 @@ export function setup(cfg: Settings): Promise<void> {
   return new Promise((done) => {
     const finish = () => { root.hidden = true; done(); };
 
-    // 进入某一页：模型页现值不在清单里、或清单是空的，就直接手填
+    // 进入某一页：模型页清单是空的就直接手填
     const enter = (s: number) => {
       step = s;
       note = "";
-      manual = s >= MODEL && !loading && !models.includes(v[key()]) && (v[key()] !== "" || !models.length);
+      manual = s >= MODEL && !loading && !models.length;
       render();
     };
+
+    // 前一页（d=-1）或后一页（d=1）。revlm 没有 base_url 页，地址由 core 填
+    const neighbor = (d: number) => (STEPS[step + d][0] === "base_url" && v.protocol === "revlm" ? step + 2 * d : step + d);
 
     const back = () => {
       if (step === 0) return finish();
       loading = false; // 不等清单了；再进模型页会重拉
-      enter(step - 1);
+      enter(neighbor(-1));
     };
 
     // 收下本页、去下一页；api_key 之后拉模型清单，最后一页保存
@@ -67,7 +70,7 @@ export function setup(cfg: Settings): Promise<void> {
         note = r.error;
         return render();
       }
-      if (key() !== "api_key") return enter(step + 1);
+      if (key() !== "api_key") return enter(neighbor(1));
       loading = true;
       models = [];
       enter(MODEL);

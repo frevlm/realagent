@@ -32,6 +32,14 @@ json parse_body(const std::string &body)
     return j.is_object() ? j : json::object();
 }
 
+/* 引导页的请求体：选 revlm 时不问地址，base_url 定成生产实例 */
+json parse_setup(const std::string &body)
+{
+    json j = parse_body(body);
+    if (j.value("protocol", "") == "revlm") j["base_url"] = kRevlmBaseUrl;
+    return j;
+}
+
 /* 自己所在目录排进 PATH 最前：随 core 发的 realontext 在那里，search 与 bash 都找得到它（ADR-0027）。 */
 void put_own_dir_on_path()
 {
@@ -161,7 +169,7 @@ int main()
     server.route("GET", "/setup", [&cfg](const std::string &) { return cfg.to_json().dump(); });
     server.route("POST", "/setup", [&cfg](const std::string &body) {
         // 只写引导页那五项：客户端的请求体里还带着 client_id 这类东西
-        const json in = parse_body(body);
+        const json in = parse_setup(body);
         for (const char *k : {"protocol", "base_url", "api_key", "model", "small_model"})
             if (in.contains(k) && !cfg.persist(k, in[k]))
                 return command_error("写 ~/.realagent/settings.json 失败（原因见 core 日志）");
@@ -169,7 +177,7 @@ int main()
         return std::string(R"({"ok":true})");
     });
     server.route("POST", "/setup/models", [](const std::string &body) {
-        const auto models = setup_models(parse_body(body));
+        const auto models = endpoint_models(parse_setup(body));
         if (!models) return command_error(models.error());
         return json{{"ok", true}, {"data", *models}}.dump();
     });

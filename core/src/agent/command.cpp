@@ -12,14 +12,25 @@ std::string command_error(const std::string &msg)
     return nlohmann::json{{"ok", false}, {"error", msg}}.dump();
 }
 
-/* /model 响应：模型数据表里的清单，current 标出配置里当前那档（ADR-0009）。 */
-static nlohmann::json models_payload(const CoreContext &ctx)
+/* /model 清单：端点报的模型，表里认得的补上 owned_by / context（ADR-0009），current 标出主模型 */
+static std::expected<nlohmann::json, std::string> models_payload(const CoreContext &ctx)
 {
-    const std::string cur = ctx.config->model(ModelTier::Main);
+    const Config &cfg = *ctx.config;
+    const auto ids = endpoint_models(
+        {{"protocol", cfg.get("protocol")}, {"base_url", cfg.get("base_url")}, {"api_key", cfg.get("api_key")}});
+    if (!ids) return std::unexpected("拉不到模型清单（" + ids.error() + "）。手动指定：/model <模型名>");
+    const std::string cur = cfg.model(ModelTier::Main);
     nlohmann::json arr = nlohmann::json::array();
-    for (nlohmann::json m : ctx.pricing->models())
+    for (const std::string &id : *ids)
     {
-        m["current"] = (m["name"] == cur);
+        nlohmann::json m{{"name", id}};
+        for (const nlohmann::json &known : ctx.pricing->models())
+            if (known["name"] == id)
+            {
+                m = known;
+                break;
+            }
+        m["current"] = (id == cur);
         arr.push_back(std::move(m));
     }
     return arr;
@@ -71,18 +82,14 @@ std::string ok_json(const char *name, nlohmann::json data)
 
 std::string cmd_model(Env &e, const std::string &arg)
 {
-    // 无参 = 列清单；带名 = 切主模型并写回 settings.json。只认模型表里有的
-    if (!arg.empty())
+    if (arg.empty())
     {
-        bool known = false;
-        for (const nlohmann::json &m : models_payload(e.ctx))
-            if (m["name"] == arg) known = true;
-        if (!known) return command_error("unknown model: " + arg);
-        // statusline 帧由事件循环发现变化后推
-        if (!e.ctx.config->persist("model", nlohmann::json(arg)))
-            return command_error("写入 settings.json 失败");
+        auto list = models_payload(e.ctx);
+        return list ? ok_json("model", std::move(*list)) : command_error(list.error());
     }
-    return ok_json("model", models_payload(e.ctx));
+    // 带名 = 切主模型，不查清单（手填）。statusline 帧由事件循环发现变化后推
+    if (!e.ctx.config->persist("model", nlohmann::json(arg))) return command_error("写入 settings.json 失败");
+    return ok_json("model", nlohmann::json::array({{{"name", arg}, {"current", true}}}));
 }
 
 /* /plugins：装了哪些、各带了什么、建 agent 时出了什么问题。只读。 */
@@ -119,7 +126,7 @@ struct CommandDef {
 
 /* 全部命令。清单与派发都读这张表，加一条命令就是加一行。 */
 constexpr CommandDef kCommands[] = {
-    {"model", "查看模型清单（/model <name> 切换主模型）", cmd_model},
+    {"model", "从端点拉模型清单（/model <name> 直接切换主模型）", cmd_model},
     {"plugins", "查看装了哪些 plugin、各带了什么（只读；装 = git clone 进目录，卸 = 删掉）",
      cmd_plugins},
 };
