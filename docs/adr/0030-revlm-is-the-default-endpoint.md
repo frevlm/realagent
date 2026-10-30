@@ -29,3 +29,38 @@ revlm 是我们自己的网关（生产实例 `https://www.revlm.com`），两�
 - 已有 `settings.json` 都写了 `protocol` 与 `base_url`（ADR-0017 的迁移要求），行为不变。
 - 端点没有模型清单接口时，`/model` 不再列出厂表，改为报原因让人手填。
 - 手写过 `"revlm_context": true` 的配置改成 `"protocol": "revlm"`。
+
+## 修订（2026-10-30）：revlm 下协议按模型取
+
+§1「请求体与帧就是 anthropic-messages」作废。revlm 的渠道各说一套（`messages` /
+`chat_completions` / `responses` / `systemone`），网关按路由挑渠道、不做协议转换，所以同一个
+token 下不同模型必须打不同路由。
+
+- revlm 的 `/v1/models`（含 `/v1/models/:id`）每条加 `protocol`，取模型所在渠道的协议名。
+  一个渠道组里一个模型只挂一种协议，这是运维约定，revlm 不校验。
+- core 的 `call_protocol(cfg, model)`：`protocol=revlm` 时按模型查这张清单，进程内记住，
+  没见过的模型再拉一次；换了 base_url 或 api_key 整张作废。缺 `protocol` 字段直接报错，
+  不回落到 messages——两头都是我们的，先发 revlm。
+- 主模型与小模型各查各的，可以说不同的协议。
+- 拉清单与 LLM 调用走同一条传输（revlm::net，说不上 h2 退回 curl），`HttpRequest` 因此多了
+  `method` 与 `timeout_s`，`post_*` 更名 `send_*`。
+
+### 待定：`systemone`
+
+revlm 的第四种渠道协议 `systemone`（TypeSafe System One，模型 `jev-*`）今天走
+`call_protocol` 的「realagent 不会说这套协议」那条报错。原因不是缺适配，是能力对不上：
+
+- 它不是对话模型。请求是 `{model, state, questions}`，`questions` 里每个问题是
+  `noul`（是/否概率）/ `choice`（单选）/ `score`（有序打分）之一；响应是
+  `{model, answers, usage}`，只有概率与选项，没有正文，`output_tokens` 恒为 0（免费）。
+  文档没提流式、`messages`、system prompt、工具。见 Databricks《Query models with the
+  TypeSafe System One API》。
+- 一次 Turn 要求模型产出正文或 `tool_use`，所以它当不了 `model`。收工判定要 `{recap, done}`：
+  `done` 形状上就是一个 `noul`，`recap` 是正文，它给不出来，所以也当不了完整的 `small_model`。
+
+两条路，未决：
+
+1. 认出 `systemone`，报一句准确的错：「这是 System One 分类模型，只回结构化答案，不能当
+   model / small_model 用」。一行映射加一条报错。
+2. 把收工判定拆开：`done` 交给 Jev 的 `noul`（快、便宜），`recap` 仍由文字模型写。一次判定
+   变两次调用，等于改写 ADR-0025。

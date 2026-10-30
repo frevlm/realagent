@@ -5,7 +5,8 @@
  *        upstream/<协议>.cpp                         downstream/<协议>.cpp
  *
  * 一个协议在一个方向上的全部知识（认证头、路径、体形状、帧结构、token 字段名）住在
- * 一个文件里：拆成独立开关就能配出无效组合。协议不从 URL 猜；默认 revlm（ADR-0030）。
+ * 一个文件里：拆成独立开关就能配出无效组合。协议不从 URL 猜；默认 revlm（ADR-0030），
+ * revlm 下每个模型说哪套由 revlm 的 /v1/models 决定（call_protocol）。
  *
  * 事件词汇只有一套：thinking_start / thinking_update / thinking_signature / thinking_stop /
  * message_update / tool_use / usage / stop。usage 的字段统一叫 input / output / cache_read /
@@ -37,8 +38,12 @@ enum class Protocol { AnthropicMessages,
                       OpenAiChat,
                       OpenAiResponses };
 
-/* 配置字符串 → 协议。"revlm" 的请求体与帧就是 anthropic-messages。认不出返回 nullopt。 */
+/* 配置里的三个线格式名 → 协议。"revlm" 不是线格式，返回 nullopt。 */
 std::optional<Protocol> protocol_from(std::string_view name);
+
+/* 这次调用说哪套协议。protocol=revlm 时按模型查 revlm 的 /v1/models（每条带 protocol），
+ * 查过的记住，没见过的模型再拉一次；其余就是配置里那个。查不到返回人话。 */
+std::expected<Protocol, std::string> call_protocol(const Config &cfg, const std::string &model);
 
 /* protocol / base_url / model 配齐了返回空串；否则返回一段人话，附一段可照抄的配置。 */
 std::string endpoint_config_error(const Config &cfg);
@@ -51,17 +56,19 @@ std::expected<std::vector<std::string>, std::string> endpoint_models(const nlohm
 std::string http_status_error(long status, const std::string &body);
 
 struct HttpRequest {
+    std::string method = "POST"; // GET 不带体
     std::string url;
     std::vector<std::string> headers; // "Key: value"
     std::string body;
+    long timeout_s = 0; // 0 = 不限：LLM 调用靠用户中断收场
 };
 
 /* —— 上行：{model, system, messages, tools} → 具体协议的请求 —— */
 HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const nlohmann::json &dialog);
 HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohmann::json &dialog);
 HttpRequest build_request(protocol::OpenAiResponses, const Config &cfg, const nlohmann::json &dialog);
-/* 按配置里的协议派发（调用前已由 endpoint_config_error 把关）。 */
-HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog);
+/* 按 call_protocol 给的协议派发。 */
+HttpRequest build_request(Protocol p, const Config &cfg, const nlohmann::json &dialog);
 
 /* anthropic-messages：一条抽象消息的 content 块 → /v1/messages 块。 */
 nlohmann::json anthropic_content_blocks(const nlohmann::json &message);

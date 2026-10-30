@@ -7,8 +7,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 
-#include <curl/curl.h>
+#include "llm/transport.hpp"
 
 namespace realagent {
 namespace fs = std::filesystem;
@@ -17,8 +18,7 @@ namespace fs = std::filesystem;
 
 std::optional<Protocol> protocol_from(std::string_view name)
 {
-    // revlm 对外说 anthropic-messages；区别只在传输与增量上下文，见 context_protocol_enabled
-    if (name == "revlm" || name == "anthropic-messages") return Protocol::AnthropicMessages;
+    if (name == "anthropic-messages") return Protocol::AnthropicMessages;
     if (name == "openai-chat") return Protocol::OpenAiChat;
     if (name == "openai-responses") return Protocol::OpenAiResponses;
     return std::nullopt;
@@ -35,7 +35,7 @@ std::string endpoint_config_error(const Config &cfg)
 
     // 写错与没写分开说
     std::string bad_protocol;
-    if (missing.empty() && !protocol_from(cfg.get("protocol")))
+    if (missing.empty() && cfg.get("protocol") != "revlm" && !protocol_from(cfg.get("protocol")))
         bad_protocol = cfg.get("protocol");
 
     if (missing.empty() && bad_protocol.empty()) return {};
@@ -68,46 +68,76 @@ std::string endpoint_config_error(const Config &cfg)
 
 /* ==================== 拉端点的模型清单（POST /setup/models、/model）==================== */
 
-static size_t append_body(char *p, size_t size, size_t n, void *out)
+/* 端点 {"data":[...]} 里那个数组。三套协议与 revlm 都是这个形状；连 revlm 与 LLM 调用走同一条传输。 */
+static std::expected<nlohmann::json, std::string> fetch_models(const nlohmann::json &in)
 {
-    static_cast<std::string *>(out)->append(p, size * n);
-    return size * n;
+    const std::string key = in.value("api_key", std::string());
+    // anthropic-messages 与 revlm 的路径带 /v1、多两个头；另两套同属 OpenAI 一家，清单端点相同
+    const std::string proto = in.value("protocol", std::string());
+    const bool anthropic = proto == "revlm" || protocol_from(proto) == Protocol::AnthropicMessages;
+    HttpRequest req{.method = "GET",
+                    .url = in.value("base_url", std::string()) + (anthropic ? "/v1/models?limit=1000" : "/models"),
+                    .headers = {"Authorization: Bearer " + key},
+                    .timeout_s = 10}; // 有人在等它，拉不到就让用户手填
+    if (anthropic) req.headers.insert(req.headers.end(), {"x-api-key: " + key, "anthropic-version: 2023-06-01"});
+
+    std::string body;
+    const std::atomic<bool> never{false};
+    const SendResult r = (proto == "revlm" ? send_revlm : send_curl)(req, [&body](std::string_view chunk) {
+        body.append(chunk);
+        return true; }, never);
+    if (std::string e = http_status_error(r.status, r.error_body); !e.empty()) return std::unexpected(e);
+    if (!r.error.empty()) return std::unexpected(r.error);
+
+    const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+    if (!j.is_object()) return std::unexpected("模型清单不是 JSON 对象");
+    return j.value("data", nlohmann::json::array());
 }
 
 std::expected<std::vector<std::string>, std::string> endpoint_models(const nlohmann::json &in)
 {
-    const std::string key = in.value("api_key", std::string());
-    // anthropic-messages 的路径带 /v1、多两个头；另两套同属 OpenAI 一家，清单端点相同
-    const bool anthropic = protocol_from(in.value("protocol", std::string())) == Protocol::AnthropicMessages;
-    const std::string url = in.value("base_url", std::string()) + (anthropic ? "/v1/models?limit=1000" : "/models");
-    std::vector<std::string> headers{"Authorization: Bearer " + key};
-    if (anthropic) headers.insert(headers.end(), {"x-api-key: " + key, "anthropic-version: 2023-06-01"});
-
-    CURL *curl = curl_easy_init();
-    if (!curl) return std::unexpected("curl 初始化失败");
-    std::string body;
-    curl_slist *hdrs = nullptr;
-    for (const auto &h : headers) hdrs = curl_slist_append(hdrs, h.c_str());
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_body);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 有人在等它，拉不到就让用户手填
-    const CURLcode rc = curl_easy_perform(curl);
-    long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    curl_easy_cleanup(curl);
-    curl_slist_free_all(hdrs);
-    if (std::string e = http_status_error(status, body); !e.empty()) return std::unexpected(e);
-    if (rc != CURLE_OK) return std::unexpected(std::string("curl 失败: ") + curl_easy_strerror(rc));
-
-    // 三套协议都是 {"data":[{"id":...}]}
-    const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
-    if (!j.is_object()) return std::unexpected("模型清单不是 JSON 对象");
+    const auto data = fetch_models(in);
+    if (!data) return std::unexpected(data.error());
     std::vector<std::string> out;
-    for (const nlohmann::json &m : j.value("data", nlohmann::json::array())) out.push_back(m.value("id", ""));
+    for (const nlohmann::json &m : *data) out.push_back(m.value("id", ""));
     std::sort(out.begin(), out.end());
     return out;
+}
+
+/* revlm 渠道的 protocol 名 → 线格式。一个渠道组里一个模型只挂一种。 */
+static std::optional<Protocol> revlm_protocol(std::string_view name)
+{
+    if (name == "messages") return Protocol::AnthropicMessages;
+    if (name == "chat_completions") return Protocol::OpenAiChat;
+    if (name == "responses") return Protocol::OpenAiResponses;
+    return std::nullopt;
+}
+
+std::expected<Protocol, std::string> call_protocol(const Config &cfg, const std::string &model)
+{
+    // 调用方已用 endpoint_config_error 把关
+    if (cfg.get("protocol") != "revlm") return *protocol_from(cfg.get("protocol"));
+
+    // 模型 → revlm 的 protocol 名，进程内共用；换了端点或 token 就作废
+    static std::mutex mtx;
+    static std::string owner;
+    static std::unordered_map<std::string, std::string> table;
+    const nlohmann::json in{{"protocol", "revlm"}, {"base_url", cfg.get("base_url")}, {"api_key", cfg.get("api_key")}};
+    std::lock_guard lock(mtx);
+    if (owner != in.dump()) table.clear();
+    if (!table.contains(model))
+    {
+        const auto data = fetch_models(in);
+        if (!data) return std::unexpected("问 revlm 模型 " + model + " 走哪套协议失败：" + data.error());
+        owner = in.dump();
+        table.clear();
+        for (const nlohmann::json &m : *data) table[m.value("id", "")] = m.value("protocol", "");
+    }
+    const auto it = table.find(model);
+    if (it == table.end()) return std::unexpected("revlm 上没有模型 " + model + "（token 绑的渠道组里没有它）");
+    if (it->second.empty()) return std::unexpected("revlm 的 /v1/models 里模型 " + model + " 没有 protocol 字段");
+    if (const auto p = revlm_protocol(it->second)) return *p;
+    return std::unexpected("revlm 说模型 " + model + " 走 " + it->second + "，realagent 不会说这套协议");
 }
 
 std::string http_status_error(long status, const std::string &body)
@@ -128,20 +158,23 @@ std::string http_status_error(long status, const std::string &body)
 
 /* ==================== 上行派发 ==================== */
 
-HttpRequest build_request(const Config &cfg, const nlohmann::json &dialog)
+HttpRequest build_request(Protocol p, const Config &cfg, const nlohmann::json &dialog)
 {
-    // 调用方已用 endpoint_config_error 把关；解不出来就是 bug，value() 抛出来
-    const auto p = protocol_from(cfg.get("protocol"));
-    switch (p.value())
+    HttpRequest req;
+    switch (p)
     {
         case Protocol::AnthropicMessages:
             return build_request(protocol::AnthropicMessages{}, cfg, dialog);
         case Protocol::OpenAiChat:
-            return build_request(protocol::OpenAiChat{}, cfg, dialog);
+            req = build_request(protocol::OpenAiChat{}, cfg, dialog);
+            break;
         case Protocol::OpenAiResponses:
-            return build_request(protocol::OpenAiResponses{}, cfg, dialog);
+            req = build_request(protocol::OpenAiResponses{}, cfg, dialog);
+            break;
     }
-    return {};
+    // revlm 的路由都在 <base_url>/v1 下；OpenAI 那两套按惯例 base 自带 /v1，这里补上
+    if (cfg.get("protocol") == "revlm") req.url.insert(cfg.get("base_url").size(), "/v1");
+    return req;
 }
 
 bool context_protocol_enabled(const Config &cfg)

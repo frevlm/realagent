@@ -360,6 +360,9 @@ class FakeRevlm {
     }
 
   protected:
+    /* 真 revlm 的 /v1/models：llm_call 先问它这个模型走哪套协议 */
+    static constexpr const char *kCatalog = R"({"data":[{"id":"m-test","protocol":"messages"}]})";
+
     struct Reply {
         int status = 200;
         std::string content_type;
@@ -432,6 +435,12 @@ class H2FakeRevlm : public FakeRevlm {
   public:
     H2FakeRevlm()
         : svr_([this](const revlm::net::test::H2TestRequest &rq) {
+              revlm::net::test::H2TestResponse rs;
+              if (rq.path.starts_with("/v1/models"))
+              {
+                  rs.body = kCatalog;
+                  return rs;
+              }
               const auto header = [&rq](const char *name) {
                   std::string want(name);
                   for (char &c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -440,7 +449,6 @@ class H2FakeRevlm : public FakeRevlm {
                   return std::string();
               };
               const Reply rp = serve(header, rq.body);
-              revlm::net::test::H2TestResponse rs;
               rs.status = rp.status;
               rs.headers.push_back({"content-type", rp.content_type});
               if (!rp.stored.empty()) rs.headers.push_back({"x-revlm-stored", rp.stored});
@@ -459,6 +467,9 @@ class H1FakeRevlm : public FakeRevlm {
   public:
     H1FakeRevlm()
     {
+        svr_.Get("/v1/models", [](const httplib::Request &, httplib::Response &rs) {
+            rs.set_content(kCatalog, "application/json");
+        });
         svr_.Post("/v1/messages", [this](const httplib::Request &rq, httplib::Response &rs) {
             const Reply rp = serve([&rq](const char *name) { return rq.get_header_value(name); }, rq.body);
             rs.status = rp.status;

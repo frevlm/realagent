@@ -1,5 +1,5 @@
 /*
- * transport.cpp — post_curl 与 post_revlm（见 transport.hpp）
+ * transport.cpp — send_curl 与 send_revlm（见 transport.hpp）
  */
 #include "llm/transport.hpp"
 
@@ -8,6 +8,7 @@
 #include <net/http2.hpp>
 
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <future>
 #include <system_error>
@@ -21,7 +22,7 @@ using namespace std::chrono_literals;
 namespace {
 
 /* 非 2xx 的响应体不是 SSE，留着报错用；2xx 交给 sink。false = sink 要求中止。 */
-bool deliver(PostResult &r, const BodySink &sink, std::string_view chunk)
+bool deliver(SendResult &r, const BodySink &sink, std::string_view chunk)
 {
     if (r.status >= 400)
     {
@@ -46,7 +47,7 @@ bool iequals(std::string_view a, std::string_view b)
 
 struct CurlCtx {
     CURL *curl;
-    PostResult *r;
+    SendResult *r;
     const BodySink *sink;
 };
 
@@ -106,9 +107,18 @@ struct NetCall {
     const HttpRequest &req;
     const BodySink &sink;
     const std::atomic<bool> &abort;
-    PostResult r;
+    SendResult r;
     bool not_h2 = false; // 对面不说 h2 / realurl/1：请求没被当成请求处理过，可以换条路重发
     std::promise<void> done;
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+
+    /* 该收手了就给出原因，否则空 */
+    const char *stop() const
+    {
+        if (abort.load()) return "已中断";
+        if (std::chrono::steady_clock::now() >= deadline) return "超时";
+        return nullptr;
+    }
 };
 
 net::Task<void> exchange(net::Client &client, NetCall &c)
@@ -116,7 +126,7 @@ net::Task<void> exchange(net::Client &client, NetCall &c)
     net::Stream st;
     try
     {
-        st = co_await client.open("POST", c.req.url, net_headers(c.req.headers));
+        st = co_await client.open(c.req.method, c.req.url, net_headers(c.req.headers));
     } catch (const std::exception &e)
     {
         c.not_h2 = true;
@@ -127,9 +137,9 @@ net::Task<void> exchange(net::Client &client, NetCall &c)
     net::ResponseHead head;
     try
     {
-        co_await st.write(c.req.body);
+        if (!c.req.body.empty()) co_await st.write(c.req.body);
         co_await st.end();
-        while (!c.abort.load())
+        while (!c.stop())
         {
             try
             {
@@ -148,10 +158,10 @@ net::Task<void> exchange(net::Client &client, NetCall &c)
         c.r.error = e.what();
         co_return;
     }
-    if (head.status == 0) // 等响应头时被中断
+    if (head.status == 0) // 等响应头时被中断或超时
     {
         st.cancel();
-        c.r.error = "已中断";
+        c.r.error = c.stop();
         co_return;
     }
     c.r.status = head.status;
@@ -161,10 +171,10 @@ net::Task<void> exchange(net::Client &client, NetCall &c)
     std::string buf(16384, '\0');
     for (;;)
     {
-        if (c.abort.load())
+        if (const char *why = c.stop())
         {
             st.cancel();
-            c.r.error = "已中断";
+            c.r.error = why;
             co_return;
         }
         std::size_t n = 0;
@@ -236,9 +246,9 @@ class Link {
 
 } // namespace
 
-PostResult post_curl(const HttpRequest &req, const BodySink &sink, const std::atomic<bool> &abort)
+SendResult send_curl(const HttpRequest &req, const BodySink &sink, const std::atomic<bool> &abort)
 {
-    PostResult r;
+    SendResult r;
     CURL *curl = curl_easy_init();
     if (!curl)
     {
@@ -249,8 +259,8 @@ PostResult post_curl(const HttpRequest &req, const BodySink &sink, const std::at
     curl_slist *hdrs = nullptr;
     for (const auto &h : req.headers) hdrs = curl_slist_append(hdrs, h.c_str());
     curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
+    if (req.method == "POST") curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, req.timeout_s);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &c);
@@ -266,16 +276,17 @@ PostResult post_curl(const HttpRequest &req, const BodySink &sink, const std::at
     return r;
 }
 
-PostResult post_revlm(const HttpRequest &req, const BodySink &sink, const std::atomic<bool> &abort)
+SendResult send_revlm(const HttpRequest &req, const BodySink &sink, const std::atomic<bool> &abort)
 {
     static Link link;
     NetCall c{.req = req, .sink = sink, .abort = abort};
+    if (req.timeout_s > 0) c.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(req.timeout_s);
     link.call(c);
     if (c.not_h2)
     {
         fprintf(stderr, "[transport] revlm::net 跟 %s 说不上 h2（%s），本次退回 curl\n", req.url.c_str(),
                 c.r.error.c_str());
-        return post_curl(req, sink, abort);
+        return send_curl(req, sink, abort);
     }
     return std::move(c.r);
 }

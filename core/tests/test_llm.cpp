@@ -4,6 +4,7 @@
  *   build_request         : 抽象对话 → 三套协议各自的请求形状与认证头
  *   SseParser             : SSE → 事件（三套协议各自的帧结构，产出同一套事件词汇）
  *   endpoint_config_error : 端点那一束缺键/协议名写错 → 人话（ADR-0017）
+ *   call_protocol         : revlm 下按模型查 /v1/models 的 protocol 字段
  *   http_status_error     : 4xx/5xx → 人话，绝不当成"内容为空的成功"
  *   Pricing               : token 用量 → 钱；models() 不报单价
  *   /model                : 清单来自端点 GET /v1/models；切换不查清单（手填）
@@ -135,7 +136,7 @@ static void test_tool_result_blocks()
 
     { // anthropic-messages：图片过得去，但要换成它的 source 形状
         const Config cfg = make_config("http://x", "k", "", "anthropic-messages");
-        const json body = json::parse(build_request(cfg, dialog).body);
+        const json body = json::parse(build_request(*protocol_from(cfg.get("protocol")), cfg, dialog).body);
         const json &c = body["messages"][1]["content"][0]["content"];
         CHECK(c.is_array() && c.size() == 2, "块数组原样是两块");
         CHECK(c[1]["type"] == "image" && c[1]["source"]["type"] == "base64" &&
@@ -145,7 +146,7 @@ static void test_tool_result_blocks()
     }
     { // openai-chat：工具消息只收字符串，非文本块压成占位
         const Config cfg = make_config("http://x/v1", "k", "", "openai-chat");
-        const json body = json::parse(build_request(cfg, dialog).body);
+        const json body = json::parse(build_request(*protocol_from(cfg.get("protocol")), cfg, dialog).body);
         std::string tool_msg;
         for (const auto &m : body["messages"])
             if (m.value("role", std::string()) == "tool") tool_msg = m["content"];
@@ -156,7 +157,7 @@ static void test_tool_result_blocks()
     }
     { // openai-responses：同一条规则，落在 function_call_output 的 output 里
         const Config cfg = make_config("http://x/v1", "k", "", "openai-responses");
-        const json body = json::parse(build_request(cfg, dialog).body);
+        const json body = json::parse(build_request(*protocol_from(cfg.get("protocol")), cfg, dialog).body);
         std::string outp;
         for (const auto &i : body["input"])
             if (i.value("type", std::string()) == "function_call_output") outp = i["output"];
@@ -185,7 +186,7 @@ static void test_build_request()
             {"name":"read","description":"读文件","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}
         ]
     })");
-    const HttpRequest req = build_request(cfg, dialog);
+    const HttpRequest req = build_request(*protocol_from(cfg.get("protocol")), cfg, dialog);
 
     CHECK(req.url == "http://127.0.0.1:18080/v1/messages", "url = base_url + /v1/messages");
     std::string hdrs;
@@ -229,7 +230,7 @@ static void test_build_request_openai_chat()
         ],
         "tools": [{"name":"read","description":"读文件","input_schema":{"type":"object"}}]
     })");
-    const HttpRequest req = build_request(cfg, dialog);
+    const HttpRequest req = build_request(*protocol_from(cfg.get("protocol")), cfg, dialog);
     CHECK(req.url == "http://127.0.0.1:18080/v1/chat/completions", "url = base_url + /chat/completions");
     std::string hdrs;
     for (const auto &h : req.headers) hdrs += h + "\n";
@@ -271,7 +272,7 @@ static void test_build_request_openai_responses()
         ],
         "tools": [{"name":"read","input_schema":{"type":"object"}}]
     })");
-    const HttpRequest req = build_request(cfg, dialog);
+    const HttpRequest req = build_request(*protocol_from(cfg.get("protocol")), cfg, dialog);
     CHECK(req.url == "http://127.0.0.1:18080/v1/responses", "url = base_url + /responses");
     const json body = json::parse(req.body, nullptr, false);
     CHECK(!body.is_discarded(), "body 是合法 JSON");
@@ -705,6 +706,47 @@ static void test_endpoint_models()
     th.join();
 }
 
+/* —— revlm 下每个模型走哪套协议：问 revlm 的 /v1/models —— */
+static void test_revlm_call_protocol()
+{
+    printf("[call_protocol revlm]\n");
+    int fetches = 0;
+    std::string catalog = R"({"data":[{"id":"claude-x","protocol":"messages"},
+        {"id":"gpt-x","protocol":"chat_completions"},{"id":"bare"}]})";
+    httplib::Server svr;
+    svr.Get("/v1/models", [&](const httplib::Request &, httplib::Response &rs) {
+        ++fetches;
+        rs.set_content(catalog, "application/json");
+    });
+    const int port = svr.bind_to_any_port("127.0.0.1");
+    std::thread th([&svr] { svr.listen_after_bind(); });
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+    const Config cfg = make_config(base, "sk-r", "", "revlm");
+
+    CHECK(call_protocol(cfg, "claude-x") == Protocol::AnthropicMessages, "messages 渠道的模型走 anthropic-messages");
+    CHECK(call_protocol(cfg, "gpt-x") == Protocol::OpenAiChat && fetches == 1,
+          "chat_completions 渠道的模型走 openai-chat，同一张清单只拉一次");
+
+    const auto bare = call_protocol(cfg, "bare");
+    CHECK(!bare && bare.error().find("没有 protocol 字段") != std::string::npos, "清单缺 protocol 字段直接报错");
+
+    catalog = R"({"data":[{"id":"new-x","protocol":"responses"}]})";
+    CHECK(call_protocol(cfg, "new-x") == Protocol::OpenAiResponses && fetches == 2,
+          "没见过的模型再拉一次清单（渠道组刚加的）");
+    const auto nope = call_protocol(cfg, "nope");
+    CHECK(!nope && nope.error().find("没有模型 nope") != std::string::npos, "拉完还没有就报渠道组里没有它");
+
+    const json dialog{{"model", "gpt-x"}, {"messages", json::array()}};
+    CHECK(build_request(Protocol::OpenAiChat, cfg, dialog).url == base + "/v1/chat/completions" &&
+              build_request(Protocol::OpenAiResponses, cfg, dialog).url == base + "/v1/responses",
+          "revlm 上的 OpenAI 两套打 <base>/v1/...");
+    CHECK(build_request(Protocol::AnthropicMessages, cfg, dialog).url == base + "/v1/messages",
+          "revlm 上的 messages 打 <base>/v1/messages");
+
+    svr.stop();
+    th.join();
+}
+
 int main()
 {
     test_build_request();
@@ -729,6 +771,7 @@ int main()
     test_pricing_factory();
     test_pricing_bad_table();
     test_endpoint_models();
+    test_revlm_call_protocol();
     printf(failures ? "\n%d 项失败\n" : "\n全部通过\n", failures);
     return failures ? 1 : 0;
 }

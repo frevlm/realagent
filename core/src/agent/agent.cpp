@@ -181,13 +181,16 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSe
     // 别的入口（send_message、完成通知）也会走到这里，所以每次都查
     if (std::string e = endpoint_config_error(*ctx_.config); !e.empty()) return fail(std::move(e));
 
-    HttpRequest req = build_request(*ctx_.config, dialog);
+    const std::string model = dialog.value("model", std::string());
+    const auto proto = call_protocol(*ctx_.config, model);
+    if (!proto) return fail(proto.error());
+    HttpRequest req = build_request(*proto, *ctx_.config, dialog);
     if (!req.url.starts_with("http")) return fail("base_url 不像个 URL（当前请求 URL: " + req.url + "）");
 
     // 增量上下文协议：ContextSession 只管协议与状态（换发送体、加头、409 重发、记统计），
     // 传输在 llm/transport：连 revlm 走 revlm::net，其余走 curl。
     ContextSession *const cs = context;
-    const auto post = context_protocol_enabled(*ctx_.config) ? post_revlm : post_curl;
+    const auto send = context_protocol_enabled(*ctx_.config) ? send_revlm : send_curl;
     const std::vector<std::string> base_headers = req.headers;
     const auto adopt = [&](ContextSession::Wire w) {
         req.body = std::move(w.body);
@@ -199,9 +202,8 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSe
     bool resent = false; // 409 只重发一次；连完整请求都 409 的服务端是真有错
     for (;;)
     {
-        SseParser parser(*protocol_from(ctx_.config->get("protocol")));
-        const std::string model = dialog.value("model", std::string());
-        const PostResult r = post(req, [&](std::string_view chunk) { return parser.feed(chunk, [&](std::string_view t, const json &ev) {
+        SseParser parser(*proto);
+        const SendResult r = send(req, [&](std::string_view chunk) { return parser.feed(chunk, [&](std::string_view t, const json &ev) {
                                                                          on_llm_event(t, ev, out, model, silent);
                                                                      }); }, abort_);
 

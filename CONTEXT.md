@@ -281,7 +281,7 @@ _Avoid_: `fast model`、`模型 profile`（档位不带端点凭证，不构成�
 
 对面那个端点说哪套话。core 支持三套（ADR-0017）：`anthropic-messages` / `openai-chat` / `openai-responses`。协议**不是公司**——`anthropic-messages` 由 Anthropic、DeepSeek、OpenRouter 等多家实现，`openai-chat` 的实现者更多。
 
-配置里还有第四个名字 `revlm`，也是默认值（ADR-0030）：请求体与帧就是 `anthropic-messages`，只是传输换成 revlm::net 并启用增量上下文协议。它说的是「对面是 revlm」，不是第四套线上格式。
+配置里还有第四个名字 `revlm`，也是默认值（ADR-0030）：传输换成 revlm::net 并启用增量上下文协议。它说的是「对面是 revlm」，不是第四套线上格式。**说哪套由模型决定**：revlm 的 `/v1/models` 每条带 `protocol`（模型所在渠道的那一套，一个渠道组里一个模型只挂一种），core 按这次调用的模型名查（`call_protocol`），缺字段直接报错。revlm 不做协议转换，打错路由就是打不通，所以这不是优化，是必须查。路由一律在 `<base_url>/v1` 下。
 
 一套协议包含四样共变的东西：**认证头、URL 路径、请求体形状、响应帧结构**（外加 token 字段名）。它们绑成一束由一个 `protocol` 值选定，不拆成四个开关——拆开就能配出无效组合（Bearer 头配 OpenAI 请求体配 `/v1/messages` 路径）。
 
