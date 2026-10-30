@@ -80,7 +80,8 @@ class Agent {
      * 下一个 turn 开头取走。notice = 这是一条完成通知。 */
     void post(std::string message, bool notice = false);
 
-    bool running() const { return running_.load(); }
+    /* 有活：在跑，或收件箱里有还没取走的。 */
+    bool running();
 
     /* 任意线程。停住 LLM 流与在跑的工具。 */
     void interrupt();

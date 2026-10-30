@@ -164,11 +164,15 @@ void Agents::interrupt(const std::string &client, const std::string &session_id)
 std::string Agents::state(const std::string &client, const std::string &session_id) const
 {
     std::lock_guard<std::mutex> lk(mtx_);
+    std::string s;
+    // 对话连同它派生出去的算一件事（ADR-0029 §5）：哪一个还有活，这段对话就还在跑
     for (const auto &[_, n] : nodes_)
-        if (n.root == session_id && n.agent->session_id() == session_id)
-            return n.group != client ? "elsewhere" : n.agent->running() ? "running"
-                                                                        : "";
-    return "";
+    {
+        if (n.root != session_id) continue;
+        if (n.group != client) return "elsewhere";
+        if (n.agent->running()) s = "running";
+    }
+    return s;
 }
 
 /* 不区分「不存在」与「不是你那一组的」：区分了就等于告诉调用方别的组里有什么。 */

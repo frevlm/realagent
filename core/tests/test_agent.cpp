@@ -318,6 +318,41 @@ int main()
         CHECK(child, "子 agent 的帧也在，session_id 是它自己的");
     }
 
+    printf("== 最后一个收工帧发出时，问得到这段对话停了 ==\n");
+    {
+        // 客户端（MCP 桥）靠「收到 agent_end 就问 GET /sessions」判定一段对话停没停。
+        // 在帧出口里同步地问，就是客户端最快能问到的那一刻
+        Agents *pool_ptr = nullptr;
+        std::vector<std::string> states;
+        std::mutex fm;
+        const ContextOf probe = [&](const std::string &client) {
+            CoreContext c = ctx;
+            c.emit_fn = [&, client](const std::string &type, const std::string &payload) {
+                if (type != "agent_end") return;
+                std::lock_guard<std::mutex> lk(fm);
+                const std::string root = nlohmann::json::parse(payload).value("root", "");
+                states.push_back(pool_ptr->state(client, root));
+            };
+            return c;
+        };
+        Agents pool(probe, approval);
+        pool_ptr = &pool;
+        std::string err;
+        const auto a = pool.open("p", home.string(), "settle", err);
+        pool.spawn(a->id(), home.string(), {a->id()}, {}, err, {}, "干活"); // a → b：b 收工叫醒 a
+        for (int i = 0; i < 400; ++i)
+        {
+            {
+                std::lock_guard<std::mutex> lk(fm);
+                if (states.size() >= 2) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::lock_guard<std::mutex> lk(fm);
+        CHECK(states.size() == 2, "两趟收工：b 一趟，被完成通知叫醒的 a 一趟");
+        CHECK(states.size() == 2 && states[1] == "", "最后那一帧发出时，对话已经不算在跑");
+    }
+
     printf("== spawn 的 agent 参数：认得的接上正文，认不得当场失败（ADR-0024 §8） ==\n");
     {
         /* 隐式 plugin（`~/.realagent/agents/`）里放一份定义：名字不带前缀，取文件名。

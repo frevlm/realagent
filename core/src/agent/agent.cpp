@@ -276,10 +276,11 @@ void Agent::start_run(std::unique_lock<std::mutex> &busy)
     broadcast("agent_start", json::object());
 }
 
+/* 顺序是契约：先通知邻居、再落 running_、最后发 agent_end。于是客户端收到任何一个
+ * agent_end 时问 GET /sessions，拿到的就是真相——被通知叫醒的那个已经在收件箱里排着，
+ * 发帧的这个已经不算在跑。反过来排，最后一个收工帧之后问到的仍是 running，再也等不到下一帧。 */
 void Agent::finish_run(std::unique_lock<std::mutex> &busy)
 {
-    broadcast("agent_end", json{{"cost", run_cost_}, {"recap", recap_}});
-    running_.store(false);
     const std::string summary = recap_.empty() ? last_text() : recap_; // 丢历史之前取
     {
         // 收件箱空了就把历史还给盘：内存里那份只是盘上的副本
@@ -294,6 +295,14 @@ void Agent::finish_run(std::unique_lock<std::mutex> &busy)
     // 两种收工不通知邻居：只由完成通知唤醒的那一趟（那只是回声，环上会无限互相唤醒）；
     // 被中断的那一趟（没跑完，而且用户正要停下整段对话，通知会把刚停下的又叫醒）
     if (pool_ && asked_ && !abort_.load()) pool_->on_done(id_, summary);
+    running_.store(false);
+    broadcast("agent_end", json{{"cost", run_cost_}, {"recap", recap_}});
+}
+
+bool Agent::running()
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    return running_.load() || !inbox_.empty();
 }
 
 /* —— 入账 —— */
