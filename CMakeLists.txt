@@ -20,4 +20,10 @@ if(GO_EXECUTABLE)
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tui
     COMMENT "Building realagent-tui (Go)"
   )
+  # MCP 桥：别的 agent（Claude Code、Codex）通过它委派活儿给 realagent
+  add_custom_target(realagent-mcp ALL
+    COMMAND ${GO_EXECUTABLE} build -o ${CMAKE_BINARY_DIR}/realagent-mcp ./cmd/realagent-mcp
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tui
+    COMMENT "Building realagent-mcp (Go)"
+  )
 endif()

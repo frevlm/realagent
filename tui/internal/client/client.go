@@ -60,6 +60,18 @@ func randomID() string {
 
 func (c *Client) SessionID() string { return c.sessionID }
 
+// With 返回绑到另一段对话的副本，共享连接与 clientID：一个进程多段对话时用。
+// sessionID 为空则开新对话。
+func (c *Client) With(workdir, sessionID string) *Client {
+	cp := *c
+	cp.workdir = workdir
+	cp.sessionID = sessionID
+	if sessionID == "" {
+		cp.sessionID = randomID()
+	}
+	return &cp
+}
+
 // Use 换到一段已有的对话。
 func (c *Client) Use(sessionID string) { c.sessionID = sessionID }
 

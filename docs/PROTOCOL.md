@@ -1,6 +1,6 @@
 # 通信协议（core ↔ 客户端）
 
-> core（C++）与客户端（TUI / gui）的通信契约：请求走 HTTP/1.1，推送走 WebSocket。
+> core（C++）与客户端（TUI / gui / MCP 桥 `realagent-mcp`，ADR-0031）的通信契约：请求走 HTTP/1.1，推送走 WebSocket。
 > 依据 ADR-0006（服务化）+ ADR-0007（TUI Go）+ ADR-0026（传输改回 TCP）。
 > **设计演进史见文末**——理解"为什么是全可靠流"必读。
 
@@ -44,7 +44,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `GET /setup` | 整棵配置树（同 settings.json 合并默认值后的样子，含 `api_key`），引导页拿它预填。TUI 启动时看 `setup_done` 是不是 `true`，不是就先跑引导 | ✅ |
 | `POST /setup` | 引导落盘，体 `{"protocol","base_url","api_key","model","small_model"}` → `{"ok":true}`。只写这五项、收到什么写什么，逐键走 `Config::persist`（内存同步改，不用重启 core），最后写 `setup_done: true` | ✅ |
 | `POST /setup/models` | 引导的模型页拉清单，体 `{"protocol","base_url","api_key"}` → `{"ok":true,"data":["模型 id",...]}`（按名排序）。core 去问端点：anthropic-messages 是 `<base_url>/v1/models`，openai-* 是 `<base_url>/models`。拉不到（HTTP 非 2xx、连不上、10 秒超时）→ `{"ok":false,"error"}`，客户端退回手动输入 | ✅ |
-| `GET /sessions` | 对话清单 `[{id, title, messages, mtime, state}]`，体 `{"client_id","workdir"}`，按 `mtime` 倒序。`state`：`running` = 本组正在跑，`elsewhere` = 在别的窗口里开着（发过去会被拒），`""` = 都不是。子 agent 的会话在 `sub/` 里，不列 | ✅ |
+| `GET /sessions` | 对话清单 `[{id, title, messages, mtime, state}]`，体 `{"client_id","workdir"}`，按 `mtime` 倒序。`state`：`running` = 本组正在跑（整段对话算：派生出去的任何一个还在跑或收件箱里有没取的，都算；收到任何一个 `agent_end` 再问，问到的就是真相，ADR-0031），`elsewhere` = 在别的窗口里开着（发过去会被拒），`""` = 都不是。子 agent 的会话在 `sub/` 里，不列 | ✅ |
 | `GET /events` | 推送流订阅：WebSocket 升级，见下节 (2)。**身份走查询串 `?client_id=X`，这是唯一的例外**——别处一律 JSON 体，而这一处身份必须让传输层看见：这条连接就是"这个客户端还在不在"的判据（ADR-0021） | ✅ |
 
 未匹配任何路由的请求返回 `404`。
@@ -88,7 +88,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `permission_request` | `{id, tool, params, root, session_id}` | 审批请求（可靠，卡点）。**不按「当前看着哪段对话」过滤**：客户端不管在看哪段都要弹，靠 `root` / `session_id` 说明是子任务还是另一段对话在问。过滤会让一段没人看的对话静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**那一组没有客户端连着推送流时当场拒绝**，不等那 30 秒 | ✅ |
 | `interrupted` | 空对象 | `POST /interrupt` 生效——agent 在某个检查点停了。此后本次 run 不再有帧 | ✅ |
 | `agent_start` | 空对象 | 一次「跑」开始：agent 从 idle 醒了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
-| `agent_end` | `{cost, recap}` | 一次「跑」收工，**唯一的收工信号**：收工判定说这趟到头了，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。`cost` 是本次跑的累计花费（含判定那次调用），`recap` 是这一趟的回顾（没配小模型时为空串，ADR-0025） | ✅ |
+| `agent_end` | `{cost, recap}` | 一次「跑」收工，**唯一的收工信号**：收工判定说这趟到头了，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。**这一帧在完成通知投出、自己不再算在跑之后才发**，所以收到它再问 `GET /sessions` 拿到的就是真相（ADR-0031）。`cost` 是本次跑的累计花费（含判定那次调用），`recap` 是这一趟的回顾（没配小模型时为空串，ADR-0025） | ✅ |
 
 ### statusline 帧
 

@@ -10,15 +10,18 @@ TUI       := $(BUILD_DIR)/realagent-tui
 $(NINJA):
 	cmake -S . -B $(BUILD_DIR) -G Ninja
 
-.PHONY: all core tui gui dev dev-browser dev-app setup setup-browser setup-app test run tui-run fmt fmt-check clean help
+.PHONY: all core tui mcp gui dev dev-browser dev-app setup setup-browser setup-app test run tui-run fmt fmt-check clean help
 
-all: core tui        ## 构建全部（core + TUI），默认目标
+all: core tui mcp    ## 构建全部（core + TUI + MCP 桥），默认目标
 
 core: $(NINJA)       ## 构建 core（C++ WebSocket 服务）
 	cmake --build $(BUILD_DIR) --target realagent-core
 
 tui: $(NINJA)        ## 构建 TUI（Go + Bubble Tea）
 	cmake --build $(BUILD_DIR) --target realagent-tui
+
+mcp: $(NINJA)        ## 构建 MCP 桥（Go，stdio，给别的 agent 委派活儿）
+	cmake --build $(BUILD_DIR) --target realagent-mcp
 
 # gui 不进 all：要 Node 与 Wails 两套工具链，只动 core / TUI 的人不该被它拖着
 WAILS := $(shell go env GOPATH)/bin/wails
