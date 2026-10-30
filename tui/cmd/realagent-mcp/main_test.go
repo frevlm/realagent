@@ -200,10 +200,13 @@ func TestWaitTimeoutReportsRunning(t *testing.T) {
 func TestEndpointErrorBecomesText(t *testing.T) {
 	f, cs := setup(t)
 	id := send(t, cs)
-	f.set("", "[]")
+	done := make(chan string, 1)
+	go func() { done <- waitFor(t, cs, id, 5) }()
+	time.Sleep(100 * time.Millisecond) // wait 先问到 running，之后只被 agent_end 叫醒；帧按序处理，那时报错已记下
 	f.push(t, "turn_end", id, id, `,"error":"端点返回 HTTP 502"`)
+	f.set("", "[]")
 	f.push(t, "agent_end", id, id, "")
-	if got, want := waitFor(t, cs, id, 5), fmt.Sprint([]item{{id, "done", "端点返回 HTTP 502"}}); got != want {
+	if got, want := <-done, fmt.Sprint([]item{{id, "done", "端点返回 HTTP 502"}}); got != want {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 }
