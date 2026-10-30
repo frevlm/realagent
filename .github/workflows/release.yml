@@ -41,7 +41,10 @@ jobs:
           echo "LDFLAGS=-stdlib=libc++ -static-libstdc++" >> "$GITHUB_ENV"
 
       - name: 构建并测试
+        env: { REVLM_TOKEN: "${{ secrets.REVLM_TOKEN }}" }
         run: |
+          # revlm 是私有仓库：FetchContent 克隆它时带上只读 token
+          git config --global url."https://x-access-token:${REVLM_TOKEN}@github.com/frevlm/revlm".insteadOf https://github.com/frevlm/revlm
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENSSL_USE_STATIC_LIBS=ON
           cmake --build build
           ctest --test-dir build --output-on-failure

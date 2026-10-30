@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -146,8 +147,11 @@ func call[T any](t *testing.T, cs *mcp.ClientSession, tool string, args map[stri
 	return v
 }
 
+// workdir 是各平台都算绝对路径的那种（Windows 上 /tmp/w 不是）
+var workdir, _ = filepath.Abs("w")
+
 func send(t *testing.T, cs *mcp.ClientSession) string {
-	return call[sendOut](t, cs, "send", map[string]any{"workdir": "/tmp/w", "prompt": "干活"}).SessionID
+	return call[sendOut](t, cs, "send", map[string]any{"workdir": workdir, "prompt": "干活"}).SessionID
 }
 
 func waitFor(t *testing.T, cs *mcp.ClientSession, id string, timeout float64) string {
@@ -159,7 +163,7 @@ func TestSendPostsMessage(t *testing.T) {
 	f, cs := setup(t)
 	id := send(t, cs)
 	got := f.post("/message")
-	if got["session_id"] != id || got["workdir"] != "/tmp/w" || got["message"] != "干活" || len(id) != 16 {
+	if got["session_id"] != id || got["workdir"] != workdir || got["message"] != "干活" || len(id) != 16 {
 		t.Fatalf("got %v id=%q", got, id)
 	}
 }
