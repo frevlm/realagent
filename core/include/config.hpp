@@ -3,7 +3,7 @@
  *
  * 启动读一次，不热重载。只有 settings.json 存在但不是合法 JSON 时 load 失败。
  * protocol / base_url 默认指向 revlm（ADR-0030）；model 没有默认值。
- * 两档模型（model / small_model）共用 base_url 与 api_key，档位间不回落。
+ * 三档模型（model / small_model / decision_model）共用 base_url 与 api_key，档位间不回落。
  * 线程安全：内部 mutex 护配置树。
  */
 #pragma once
@@ -22,8 +22,9 @@ namespace realagent {
 inline constexpr std::string_view kRevlmBaseUrl = "https://www.revlm.com";
 
 enum class ModelTier {
-    Main, // 对话主链路
-    Small // 杂活（收工判定）
+    Main,    // 对话主链路
+    Small,   // 杂活（写 recap）
+    Decision // System One 判断（收工判定，仅 revlm）
 };
 
 class Config {

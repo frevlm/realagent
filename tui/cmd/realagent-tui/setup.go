@@ -1,7 +1,7 @@
 // 首启引导：settings.json 里 setup_done 不为 true（或 `realagent-tui setup`）时，进主界面前先走一遍。
 //
-// 一页一项：protocol → base_url → api_key → model → small_model，现值预填；选 revlm 跳过 base_url。
-// 模型两页先拉端点的模型清单（POST /setup/models）给人选，选「手动输入…」或拉不到就手填。
+// 一页一项：protocol → base_url → api_key → model → small_model → decision_model，现值预填；选 revlm 跳过 base_url。
+// 模型三页先拉端点的模型清单（POST /setup/models）给人选，选「手动输入…」或拉不到就手填。
 // 写盘归 core（POST /setup），它的内存同步更新，走完直接进主界面。Esc 回上一页，第一页 Esc 跳过。
 package main
 
@@ -22,6 +22,7 @@ const (
 	stepAPIKey
 	stepModel
 	stepSmallModel
+	stepDecisionModel
 )
 
 var setupSteps = [...]struct{ name, hint string }{
@@ -29,7 +30,8 @@ var setupSteps = [...]struct{ name, hint string }{
 	{"base_url", "anthropic-messages 不带 /v1（https://api.anthropic.com）；openai-* 带到 /v1（https://api.openai.com/v1）"},
 	{"api_key", "端点的 API key（revlm 没有 OAuth：填 www.revlm.com 控制台里建的 token）"},
 	{"model", "对话用的主模型"},
-	{"small_model", "收工判定用的小模型；手动输入留空 = 不做收工判定"},
+	{"small_model", "写 recap 的小模型；留空 = 不写 recap"},
+	{"decision_model", "收工判定用的 decision model（System One，仅 revlm）；留空 = 不做收工判定"},
 }
 
 const manualItem = "手动输入…"
@@ -54,7 +56,7 @@ type modelsFetched struct {
 
 func newSetupModel(c *client.Client, s client.Setup) setupModel {
 	m := setupModel{client: c}
-	for i, v := range []string{s.Protocol, s.BaseURL, s.APIKey, s.Model, s.SmallModel} {
+	for i, v := range []string{s.Protocol, s.BaseURL, s.APIKey, s.Model, s.SmallModel, s.DecisionModel} {
 		m.eds[i].set(v)
 	}
 	return m.enter(stepProtocol)
@@ -62,7 +64,7 @@ func newSetupModel(c *client.Client, s client.Setup) setupModel {
 
 func (m setupModel) values() client.Setup {
 	v := func(i int) string { return strings.TrimSpace(m.eds[i].value()) }
-	return client.Setup{Protocol: v(0), BaseURL: v(1), APIKey: v(2), Model: v(3), SmallModel: v(4)}
+	return client.Setup{Protocol: v(0), BaseURL: v(1), APIKey: v(2), Model: v(3), SmallModel: v(4), DecisionModel: v(5)}
 }
 
 // choices 是列表页的可选项；文本页返回 nil
@@ -165,7 +167,7 @@ func (m setupModel) confirm() (setupModel, tea.Cmd) {
 			list, err := c.FetchModels(s)
 			return modelsFetched{list: list, err: err}
 		}
-	case stepSmallModel:
+	case stepDecisionModel:
 		return m, func() tea.Msg { return setupSaved{err: c.ApplySetup(s)} }
 	}
 	return m.enter(m.neighbor(1)), nil

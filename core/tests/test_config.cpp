@@ -119,7 +119,7 @@ int main()
         if (!r) CHECK(r.error().find("JSON") != std::string::npos, "错误说明是 JSON 问题");
     }
 
-    printf("== 覆盖生效 + 两档模型各取各的 ==\n");
+    printf("== 覆盖生效 + 各档模型各取各的 ==\n");
     {
         write_settings(home, k_full);
         const auto r = Config::load();
@@ -140,6 +140,18 @@ int main()
         const auto r = Config::load();
         CHECK(r.has_value() && r->model(ModelTier::Small) != "m-main",
               "缺 small_model → 取默认档，不替它填主模型");
+    }
+
+    printf("== decision_model 是第三档：默认空，不回落 ==\n");
+    {
+        write_settings(home, R"({"model":"m-main","small_model":"m-small"})");
+        const auto none = Config::load();
+        CHECK(none.has_value() && none->model(ModelTier::Decision).empty(), "没配 decision_model → 空串，不取主模型也不取小模型");
+
+        write_settings(home, R"({"model":"m-main","decision_model":"m-decide"})");
+        const auto r = Config::load();
+        CHECK(r.has_value() && r->model(ModelTier::Decision) == "m-decide", "配了就取 decision_model");
+        CHECK(r.has_value() && r->model(ModelTier::Small).empty(), "小模型不受影响，仍是空");
     }
 
     printf("== cwd 不参与配置：换个目录结果不变 ==\n");

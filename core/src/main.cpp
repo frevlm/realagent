@@ -168,9 +168,9 @@ int main()
     // 引导页预填现值：配置树原样给，客户端改完原样写回
     server.route("GET", "/setup", [&cfg](const std::string &) { return cfg.to_json().dump(); });
     server.route("POST", "/setup", [&cfg](const std::string &body) {
-        // 只写引导页那五项：客户端的请求体里还带着 client_id 这类东西
+        // 只写引导页那六项：客户端的请求体里还带着 client_id 这类东西
         const json in = parse_setup(body);
-        for (const char *k : {"protocol", "base_url", "api_key", "model", "small_model"})
+        for (const char *k : {"protocol", "base_url", "api_key", "model", "small_model", "decision_model"})
             if (in.contains(k) && !cfg.persist(k, in[k]))
                 return command_error("写 ~/.realagent/settings.json 失败（原因见 core 日志）");
         cfg.persist("setup_done", true);

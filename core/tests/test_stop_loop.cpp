@@ -1,16 +1,17 @@
 /*
- * test_stop_loop.cpp — 出口那条路，端到端（ADR-0025）
+ * test_stop_loop.cpp — 出口那条路，端到端（ADR-0025、ADR-0032）
  *
- * 对手是本文件里起的一个假端点：说 openai-chat，按请求里的模型名挑一份预置的 SSE 回。
- * 于是「主模型没调工具 → 问小模型 → 打回 / 收工」这条路整条走得通，不必真花钱。
+ * 对手是本文件里起的一个假端点：一个 HTTP/1.1 桩，同时扮 revlm 的 /v1/models、/v1/systemone
+ * 与聊天（按请求里的模型名挑一份预置的 SSE 回）。send_revlm 先说 h2，桩回 HTTP/1.1，
+ * 于是退回 curl（transport.hpp），整条路走得通，不必真花钱。
  *
  * 验的全是这次改动里会坏的：
- *   - 主模型没调工具**不再等于收工**：裁判说没干完就打回，主模型接着跑
+ *   - 主模型没调工具**不等于收工**：decision_model 说没干完就打回，主模型接着跑，**小模型一次不问**
  *   - 打回那条消息进历史，带 supervisor 标记（下一次判定要认得出它不是用户说的）
- *   - 裁判说干完了才收工，recap 落在 agent_end 帧里
- *   - **裁判那次调用的正文一个字都不往客户端推**——那是给它自己看的
- *   - 裁判一直说没干完时，连着三轮没跑工具就强制收工（kMaxStall）
- *   - 没配小模型就没有裁判：一次都不问，行为退回这个功能之前
+ *   - decision_model 说干完了才问小模型写 recap，recap 落在 agent_end 帧里
+ *   - **recap 那次调用的正文一个字都不往客户端推**——那是给 recap 自己用的
+ *   - 一直说没干完时，连着三轮没跑工具就强制收工（kMaxStall）
+ *   - 没配 decision_model、或端点不是 revlm：不问 System One，行为退回这个功能之前
  */
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -23,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,6 +33,7 @@
 #include "agent/approval.hpp"
 #include "agent/context.hpp"
 #include "agent/session.hpp"
+#include "agent/verdict.hpp"
 #include "config.hpp"
 
 namespace fs = std::filesystem;
@@ -56,9 +59,9 @@ static bool has(const std::string &hay, const std::string &needle)
     return hay.find(needle) != std::string::npos;
 }
 
-/* —— 假端点：一个线程、一个监听套接字、按模型名挑回答 ——
+/* —— 假端点：一个线程、一个监听套接字、按路径与模型名挑回答 ——
  *
- * 只说 openai-chat 一套：这里验的是 loop 的出口，不是协议解析（那是 test_llm 的活）。 */
+ * 聊天只说 openai-chat 一套：这里验的是 loop 的出口，不是协议解析（那是 test_llm 的活）。 */
 class FakeEndpoint {
   public:
     FakeEndpoint()
@@ -89,15 +92,24 @@ class FakeEndpoint {
         if (th_.joinable()) th_.join();
     }
 
-    std::string base_url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/v1"; }
+    /* revlm 的 base_url 不带 /v1（路由自己补）；openai-chat 的带 */
+    std::string base_url() const { return "http://127.0.0.1:" + std::to_string(port_); }
 
     /* 主模型每被问一次，就按顺序发下一份回答（问多了就重复最后一份） */
     void main_says(std::vector<std::string> texts) { main_ = std::move(texts); }
-    /* 小模型同上。这些是裁判要回的那段 JSON */
+    /* 小模型同上。这些是 recap 的正文 */
     void small_says(std::vector<std::string> texts) { small_ = std::move(texts); }
+    /* System One 每被问一次，就按顺序回下一个 done 的把握（问多了就重复最后一个） */
+    void decision_says(std::vector<double> noul) { decision_ = std::move(noul); }
 
     int main_calls() const { return main_n_.load(); }
     int small_calls() const { return small_n_.load(); }
+    int decision_calls() const { return decision_n_.load(); }
+    std::string last_decision_request() const
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return last_decision_;
+    }
 
   private:
     static std::string sse(const std::string &text)
@@ -108,11 +120,46 @@ class FakeEndpoint {
         return "data: " + d.dump() + "\n\ndata: " + fin.dump() + "\n\ndata: [DONE]\n\n";
     }
 
-    static const std::string &pick(const std::vector<std::string> &v, int n)
+    template <class T>
+    static const T &pick(const std::vector<T> &v, int n)
     {
-        static const std::string empty = "(nothing)";
+        static const T empty{};
         if (v.empty()) return empty;
         return v[(size_t)n < v.size() ? (size_t)n : v.size() - 1];
+    }
+
+    static std::string json_reply(const nlohmann::json &j)
+    {
+        const std::string body = j.dump();
+        return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
+               "\r\nConnection: close\r\n\r\n" + body;
+    }
+
+    /* 按请求行路由。revlm::net 的开场白（REALURL/1、h2 的 PRI）不是 HTTP 请求，回一句 400，
+     * send_revlm 据此退回 curl */
+    std::string respond(const std::string &req)
+    {
+        if (!req.starts_with("GET ") && !req.starts_with("POST ")) return "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+        const std::string line = req.substr(0, req.find("\r\n"));
+        if (has(line, "/models"))
+        {
+            nlohmann::json data = nlohmann::json::array();
+            for (const char *id : {"m-main", "m-small", "m-decide"}) data.push_back({{"id", id}, {"protocol", "chat_completions"}});
+            return json_reply({{"data", data}});
+        }
+        if (has(line, "/systemone"))
+        {
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                last_decision_ = req;
+            }
+            return json_reply({{"model", "jev-1.14.0"},
+                               {"answers", {{"done", {{"type", "noul"}, {"noul", pick(decision_, decision_n_++)}}}}},
+                               {"usage", {{"input_tokens", 10}, {"output_tokens", 2}}}});
+        }
+        const bool is_small = has(req, "m-small");
+        const std::string text = is_small ? pick(small_, small_n_++) : pick(main_, main_n_++);
+        return "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + sse(text);
     }
 
     void serve()
@@ -139,11 +186,12 @@ class FakeEndpoint {
                 if (req.size() - (hdr + 4) >= want) break;
             }
 
-            const bool is_small = has(req, "m-small");
-            const std::string body =
-                sse(is_small ? pick(small_, small_n_++) : pick(main_, main_n_++));
-            const std::string resp =
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + body;
+            if (req.empty()) // 只连不说话的探测连接
+            {
+                ::close(c);
+                continue;
+            }
+            const std::string resp = respond(req);
             ::send(c, resp.data(), resp.size(), 0);
             ::close(c);
         }
@@ -154,7 +202,10 @@ class FakeEndpoint {
     std::thread th_;
     std::atomic<bool> stop_{false};
     std::vector<std::string> main_, small_;
-    std::atomic<int> main_n_{0}, small_n_{0};
+    std::vector<double> decision_;
+    std::atomic<int> main_n_{0}, small_n_{0}, decision_n_{0};
+    mutable std::mutex mtx_;
+    std::string last_decision_;
 };
 
 /* 收到的事件帧。agent 线程往里写，主线程读——一把锁就够 */
@@ -213,6 +264,19 @@ static nlohmann::json history(const Agent &a)
     return out;
 }
 
+/* settings.json 换一份并重载 */
+static std::optional<Config> reload(const fs::path &home, const nlohmann::json &s)
+{
+    std::ofstream(home / ".realagent" / "settings.json") << s.dump();
+    auto c = Config::load();
+    if (!c)
+    {
+        printf("  FAIL: 配置加载失败\n");
+        return std::nullopt;
+    }
+    return std::move(*c);
+}
+
 int main()
 {
     const fs::path home =
@@ -222,24 +286,17 @@ int main()
     ::setenv("HOME", home.c_str(), 1);
 
     FakeEndpoint ep;
-    {
-        nlohmann::json s{{"protocol", "openai-chat"},
-                         {"base_url", ep.base_url()},
-                         {"api_key", "k"},
-                         {"model", "m-main"},
-                         {"small_model", "m-small"},
-                         {"permission", "allow-all"}};
-        std::ofstream(home / ".realagent" / "settings.json") << s.dump();
-    }
+    const nlohmann::json revlm{{"protocol", "revlm"},
+                               {"base_url", ep.base_url()},
+                               {"api_key", "k"},
+                               {"model", "m-main"},
+                               {"small_model", "m-small"},
+                               {"decision_model", "m-decide"},
+                               {"permission", "allow-all"}};
+    auto cfg = reload(home, revlm);
+    if (!cfg) return 1;
 
-    auto cfg = Config::load();
-    if (!cfg)
-    {
-        printf("  FAIL: 配置加载失败\n");
-        return 1;
-    }
-
-    printf("== 裁判说没干完：打回，主模型接着跑 ==\n");
+    printf("== System One 说没干完：打回，主模型接着跑，小模型一次不问 ==\n");
     {
         Frames f;
         CoreContext ctx{.config = &*cfg,
@@ -247,25 +304,32 @@ int main()
                         .emit_fn = [&f](const std::string &t, const std::string &p) { f.add(t, p); }};
         ApprovalCoordinator approval;
         ep.main_says({"MAIN_FIRST", "MAIN_SECOND"});
-        ep.small_says({R"({"recap":"半截","done":false,"reason":"JUDGE_REASON 还没跑测试"})",
-                       R"({"recap":"RECAP_DONE","done":true,"reason":""})"});
+        ep.decision_says({0.2, 0.9});
+        ep.small_says({"RECAP_DONE"});
 
         Agent a(ctx, approval, home.string(), 1);
         a.post("干活");
         CHECK(wait_end(f), "收工了（等到 agent_end）");
 
         CHECK(ep.main_calls() == 2, "主模型跑了两轮——第一轮没调工具但没收工，是被打回的");
-        CHECK(ep.small_calls() == 2, "裁判问了两次，一轮一次");
+        CHECK(ep.decision_calls() == 2, "System One 问了两次，一轮一次");
+        CHECK(ep.small_calls() == 1, "小模型只在收工那一轮写 recap，打回那轮没问");
+
+        const std::string asked = ep.last_decision_request();
+        const nlohmann::json body = nlohmann::json::parse(asked.substr(asked.find("\r\n\r\n") + 4), nullptr, false);
+        CHECK(has(asked, "POST /v1/systemone") && has(asked, "Authorization: Bearer k"), "POST /v1/systemone，带 Bearer");
+        CHECK(body.is_object() && body.size() == 3 && body["model"] == "m-decide", "体里是 model / state / questions");
+        CHECK(body["state"]["user"] == "干活" && body["state"]["assistant"] == "MAIN_SECOND",
+              "state 是这一趟 user 的话与最后一条助手正文（打回的不算 user）");
 
         const nlohmann::json h = history(a);
-        std::string kicked;
+        int kicked = 0;
         for (const auto &m : h)
             if (m.value("role", "") == "user")
                 for (const auto &b : m["content"])
-                    if (b.value("type", "") == "text" && has(b.value("text", ""), "JUDGE_REASON"))
-                        kicked = b.value("text", "");
-        CHECK(!kicked.empty(), "打回的理由进了历史——主模型看得见它为什么被打回");
-        CHECK(kicked.rfind(kSupervisorTag, 0) == 0,
+                    if (b.value("type", "") == "text" && b.value("text", "") == kKickback) ++kicked;
+        CHECK(kicked == 1, "打回那条进了历史，一次打回一条");
+        CHECK(std::string(kKickback).rfind(kSupervisorTag, 0) == 0,
               "打回那条带 supervisor 标记，下一次判定认得出它不是用户说的");
 
         const std::string ended = f.last("agent_end");
@@ -273,58 +337,78 @@ int main()
 
         const std::string deltas = f.joined("message_update");
         CHECK(has(deltas, "MAIN_FIRST") && has(deltas, "MAIN_SECOND"), "主模型的正文照推");
-        CHECK(!has(deltas, "RECAP_DONE") && !has(deltas, "JUDGE_REASON"),
-              "裁判那次调用的正文一个字都没推给客户端");
+        CHECK(f.count("message_update") == 2, "recap 那次调用的正文一个字都没推给客户端：只有主模型的两段");
     }
 
-    printf("== 裁判一直说没干完：连着三轮没跑工具就强制收工 ==\n");
+    printf("== System One 一直说没干完：连着三轮没跑工具就强制收工 ==\n");
     {
         Frames f;
         CoreContext ctx{.config = &*cfg,
                         .pricing = nullptr,
                         .emit_fn = [&f](const std::string &t, const std::string &p) { f.add(t, p); }};
         ApprovalCoordinator approval;
-        const int before = ep.main_calls();
+        const int main_before = ep.main_calls(), decision_before = ep.decision_calls(), small_before = ep.small_calls();
         ep.main_says({"STILL_TALKING"});
-        ep.small_says({R"({"recap":"没完","done":false,"reason":"接着干"})"});
+        ep.decision_says({0.1});
+        ep.small_says({"RECAP_FORCED"});
 
         Agent a(ctx, approval, home.string(), 3);
         a.post("干活");
         CHECK(wait_end(f), "还是收工了——不设轮数上限，但推不动了要认");
-        CHECK(ep.main_calls() - before == 3,
+        CHECK(ep.main_calls() - main_before == 3,
               "主模型跑了三轮就打住：打回两次，第三次判定强制收工（kMaxStall）");
+        CHECK(ep.decision_calls() - decision_before == 3, "System One 问了三次");
+        CHECK(ep.small_calls() - small_before == 1 && has(f.last("agent_end"), "RECAP_FORCED"),
+              "强制收工也是收工：小模型写一次 recap，邻居照样知道这一趟干了什么");
     }
 
-    printf("== 没配小模型：没有裁判，没调工具就算干完了 ==\n");
+    printf("== 没配 decision_model：不问 System One，没调工具就算干完了 ==\n");
     {
-        // settings.json 换一份，去掉 small_model。**不回落主模型**（ADR-0010）——
-        // 行为退回这个功能之前
-        nlohmann::json s{{"protocol", "openai-chat"},
-                         {"base_url", ep.base_url()},
-                         {"api_key", "k"},
-                         {"model", "m-main"},
-                         {"permission", "allow-all"}};
-        std::ofstream(home / ".realagent" / "settings.json") << s.dump();
-        auto c2 = Config::load();
-        if (!c2)
-        {
-            printf("  FAIL: 配置重载失败\n");
-            return 1;
-        }
+        // **不回落**主模型或小模型（ADR-0010）。也去掉 small_model：什么都不问
+        nlohmann::json s = revlm;
+        s.erase("decision_model");
+        s.erase("small_model");
+        auto c2 = reload(home, s);
+        if (!c2) return 1;
 
         Frames f;
         CoreContext ctx{.config = &*c2,
                         .pricing = nullptr,
                         .emit_fn = [&f](const std::string &t, const std::string &p) { f.add(t, p); }};
         ApprovalCoordinator approval;
-        const int before = ep.small_calls();
+        const int decision_before = ep.decision_calls(), small_before = ep.small_calls();
         ep.main_says({"ONLY_ANSWER"});
 
         Agent a(ctx, approval, home.string(), 2);
         a.post("说句话");
         CHECK(wait_end(f), "收工了");
-        CHECK(ep.small_calls() == before, "一次都没问裁判——没配就是没有裁判");
-        CHECK(has(f.last("agent_end"), "\"recap\":\"\""), "没有裁判就没有 recap，字段仍在（帧形状恒定）");
+        CHECK(ep.decision_calls() == decision_before, "System One 一次没问");
+        CHECK(ep.small_calls() == small_before, "小模型一次没问");
+        CHECK(has(f.last("agent_end"), "\"recap\":\"\""), "没有小模型就没有 recap，字段仍在（帧形状恒定）");
+    }
+
+    printf("== 端点不是 revlm：decision_model 配了也不问 ==\n");
+    {
+        nlohmann::json s = revlm;
+        s["protocol"] = "openai-chat";
+        s["base_url"] = ep.base_url() + "/v1";
+        auto c3 = reload(home, s);
+        if (!c3) return 1;
+
+        Frames f;
+        CoreContext ctx{.config = &*c3,
+                        .pricing = nullptr,
+                        .emit_fn = [&f](const std::string &t, const std::string &p) { f.add(t, p); }};
+        ApprovalCoordinator approval;
+        const int decision_before = ep.decision_calls(), small_before = ep.small_calls();
+        ep.main_says({"ONLY_ANSWER"});
+        ep.small_says({"RECAP_PLAIN"});
+
+        Agent a(ctx, approval, home.string(), 4);
+        a.post("说句话");
+        CHECK(wait_end(f), "收工了");
+        CHECK(ep.decision_calls() == decision_before, "System One 一次没问");
+        CHECK(ep.small_calls() - small_before == 1 && has(f.last("agent_end"), "RECAP_PLAIN"), "小模型照写 recap");
     }
 
     printf(failures ? "\nFAILED (%d)\n" : "\nALL PASS\n", failures);

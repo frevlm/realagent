@@ -1,11 +1,12 @@
 /*
- * test_verdict.cpp — 收工判定的三个纯函数（ADR-0025）
+ * test_verdict.cpp — 收工判定的纯函数（ADR-0025、ADR-0032）
  *
  * 这里不打 LLM 调用，也不起 agent：judge() 要的是网络与配置，而会坏的不是那一次
- * curl，是这三件事——
- *   - 抄本里 user 消息一条不丢（那是意图，丢了裁判就没法判「用户要的做到了没有」）
+ * 请求，是这几件事——
+ *   - 抄本里 user 消息一条不丢（那是意图，丢了 recap 就没法写「用户要的」）
  *   - 抄本里认得出裁判自己上次说的话（不标的话它会读成用户的新要求，然后催第二遍）
- *   - 小模型回来的东西解不出时判**收工**（判不出来不该把人扣在循环里花钱）
+ *   - System One 的 state 只有这一趟 user 的话与最后一条助手正文
+ *   - System One 的答案读不出时判**收工**（判不出来不该把人扣在循环里花钱）
  */
 #include <cstdio>
 #include <string>
@@ -105,25 +106,69 @@ int main()
         CHECK(has(t, "truncated"), "单条长结果按行截断，也说一声");
     }
 
-    printf("== 解回答 ==\n");
+    printf("== System One 的 state ==\n");
     {
-        const StopVerdict a = parse_stop_verdict(R"({"recap":"改了 README","done":true,"reason":""})");
-        CHECK(a.done && a.recap == "改了 README", "正常的 JSON");
+        nlohmann::json msgs = nlohmann::json::array();
+        msgs.push_back(text_msg("user", "BEFORE_RUN"));
+        msgs.push_back(text_msg("assistant", "OLD_REPLY"));
+        const size_t from = msgs.size();
+        msgs.push_back(text_msg("user", "FIRST_ASK"));
+        msgs.push_back(nlohmann::json{
+            {"role", "assistant"},
+            {"content", nlohmann::json::array({nlohmann::json{{"type", "thinking"}, {"thinking", "SECRET_THOUGHT"}},
+                                               nlohmann::json{{"type", "text"}, {"text", "MID_REPLY"}},
+                                               nlohmann::json{{"type", "tool_use"},
+                                                              {"id", "t1"},
+                                                              {"name", "read"},
+                                                              {"input", {{"file_path", "README.md"}}}}})}});
+        msgs.push_back(nlohmann::json{
+            {"role", "user"},
+            {"content", nlohmann::json::array({nlohmann::json{
+                            {"type", "tool_result"},
+                            {"tool_use_id", "t1"},
+                            {"content", nlohmann::json::array({{{"type", "text"}, {"text", "FILE_BODY"}}})}}})}});
+        msgs.push_back(text_msg("user", std::string(kSupervisorTag) + "KICKBACK"));
+        msgs.push_back(text_msg("user", "SECOND_ASK"));
+        msgs.push_back(text_msg("assistant", "LAST_REPLY"));
 
-        const StopVerdict b = parse_stop_verdict("好的，我看了一下：\n{\"recap\":\"R\",\"done\":false,\"reason\":\"测试没跑\"}\n");
-        CHECK(!b.done && b.reason == "测试没跑", "前后带闲话也认——只取第一个 { 到最后一个 }");
+        const nlohmann::json st = decision_state(msgs, from);
+        CHECK(st.size() == 2, "state 只有 user 与 assistant 两个字段");
+        CHECK(st["user"] == "FIRST_ASK\n\nSECOND_ASK", "这一趟 user 的话以空行相接，不含之前的、打回的、工具结果");
+        CHECK(st["assistant"] == "LAST_REPLY", "assistant 只取最后一条的正文");
 
-        const StopVerdict c = parse_stop_verdict(R"({"recap":"R","done":"false","reason":"还差一步"})");
-        CHECK(!c.done, "done 写成字符串也认——小模型常这么干");
+        nlohmann::json one = nlohmann::json::array({text_msg("user", "ASK"),
+                                                    nlohmann::json{{"role", "assistant"},
+                                                                   {"content", nlohmann::json::array({{{"type", "text"}, {"text", "A"}},
+                                                                                                      {{"type", "text"}, {"text", "B"}}})}}});
+        CHECK(decision_state(one, 0)["assistant"] == "AB", "最后一条助手消息的多个正文块拼在一起");
 
-        const StopVerdict d = parse_stop_verdict("这一趟把 README 改好了。");
-        CHECK(d.done && has(d.recap, "README"), "回的不是 JSON：那段话当 recap，判收工");
+        const nlohmann::json big = decision_state(nlohmann::json::array({text_msg("user", std::string(kDecisionFieldCap + 10, 'u')),
+                                                                         text_msg("assistant", std::string(kDecisionFieldCap + 10, 'a'))}),
+                                                  0);
+        CHECK(big["user"] == std::string(kDecisionFieldCap, 'u') + "…(truncated)", "user 超长截断并说明");
+        CHECK(big["assistant"] == std::string(kDecisionFieldCap, 'a') + "…(truncated)", "assistant 超长截断并说明");
+    }
 
-        const StopVerdict e = parse_stop_verdict("");
-        CHECK(e.done, "什么都没回也判收工——判不出来不该把人扣在循环里花钱");
+    printf("== System One 的问题与答案 ==\n");
+    {
+        const nlohmann::json q = decision_questions();
+        CHECK(q["done"]["type"] == "noul", "问的是 noul 类型的 done");
+        CHECK(q["done"]["criteria"]["true"].is_string() && q["done"]["criteria"]["false"].is_string(), "true / false 各有判据");
 
-        const StopVerdict f = parse_stop_verdict(R"({"recap":"R"})");
-        CHECK(f.done, "没写 done 就是收工，不是「没说所以接着干」");
+        const auto ans = [](double n) { return nlohmann::json{{"done", {{"type", "noul"}, {"noul", n}}}}; };
+        CHECK(decision_done(ans(0.83)), "0.83 → 收工");
+        CHECK(decision_done(ans(0.5)), "0.5 → 收工（含边界）");
+        CHECK(decision_done(ans(0.2)) == false, "0.2 → 没干完");
+        CHECK(decision_done(nlohmann::json::object()), "没有 done → 收工");
+        CHECK(decision_done(nlohmann::json{{"done", "yes"}}), "done 不是对象 → 收工");
+        CHECK(decision_done(nlohmann::json{{"done", {{"noul", "0.1"}}}}), "noul 不是数字 → 收工");
+        CHECK(decision_done(nlohmann::json(nullptr)), "answers 不是对象 → 收工");
+    }
+
+    printf("== recap ==\n");
+    {
+        CHECK(clip_recap("改了 README") == "改了 README", "recap 原文照留");
+        CHECK(clip_recap(std::string(kRecapCap + 1, 'r')) == std::string(kRecapCap, 'r') + "…(truncated)", "超长截断并说明");
     }
 
     printf(failures ? "\nFAILED (%d)\n" : "\nALL PASS\n", failures);

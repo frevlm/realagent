@@ -1,7 +1,7 @@
 // 首启引导（同 TUI 的 setup.go）：setup_done 不为 true（或 make setup-*）时，进主界面前先走一遍。
 //
-// 一页一项：protocol → base_url → api_key → model → small_model，现值预填；选 revlm 跳过 base_url。
-// 模型两页先拉端点的模型清单（POST /setup/models）给人选，选「手动输入…」或拉不到就手填。
+// 一页一项：protocol → base_url → api_key → model → small_model → decision_model，现值预填；选 revlm 跳过 base_url。
+// 模型三页先拉端点的模型清单（POST /setup/models）给人选，选「手动输入…」或拉不到就手填。
 // 写盘归 core（POST /setup），走完直接进主界面。Esc / 上一步 回上一页，第一页是跳过。
 
 import { call, type Reply } from "./core";
@@ -14,6 +14,7 @@ export interface Settings {
   api_key?: string;
   model?: string;
   small_model?: string;
+  decision_model?: string;
 }
 
 const PROTOCOLS = ["revlm", "anthropic-messages", "openai-chat", "openai-responses"];
@@ -24,7 +25,8 @@ const STEPS = [
   ["base_url", "端点地址", "`anthropic-messages` 不带 /v1，如 `https://api.anthropic.com`；`openai-*` 带到 /v1，如 `https://api.openai.com/v1`。"],
   ["api_key", "API key", "端点的 API key（revlm 没有 OAuth：填 `www.revlm.com` 控制台里建的 token）。"],
   ["model", "主模型", "对话用的模型。"],
-  ["small_model", "小模型", "收工判定用的模型。手动输入并留空 = 不做收工判定。"],
+  ["small_model", "小模型", "写 recap 的模型。手动输入并留空 = 不写 recap。"],
+  ["decision_model", "收工判定模型", "收工判定用的 decision model（System One，仅 revlm）。手动输入并留空 = 不做收工判定。"],
 ] as const;
 type Key = (typeof STEPS)[number][0];
 const MODEL = 3; // 从这一页起是模型页
@@ -64,7 +66,7 @@ export function setup(cfg: Settings): Promise<void> {
       if (val === MANUAL) { manual = true; return render(); }
       v[key()] = val.trim();
       if ((key() === "base_url" || key() === "model") && !v[key()]) { note = `${key()} 不能为空`; return render(); }
-      if (key() === "small_model") {
+      if (key() === "decision_model") {
         const r = await call<Reply>("POST", "/setup", v).catch((e) => ({ error: String(e) }));
         if (!r.error) return finish();
         note = r.error;
@@ -86,7 +88,7 @@ export function setup(cfg: Settings): Promise<void> {
     function render() {
       const items = choices();
       const [k, title, hint] = STEPS[step];
-      const last = k === "small_model";
+      const last = k === "decision_model";
       root.innerHTML = `
         <a class="brand"><span class="brand-mark">${ic("brand")}</span>realagent</a>
         <div class="setup-card">

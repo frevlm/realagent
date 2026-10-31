@@ -208,12 +208,13 @@ func (c *Client) FetchStatusline() (Statusline, error) {
 
 // Setup 是首启引导的那几项：GET /setup 回整棵配置树，取这几个；POST /setup 原样写回。
 type Setup struct {
-	Done       bool   `json:"setup_done,omitempty"`
-	Protocol   string `json:"protocol"`
-	BaseURL    string `json:"base_url"`
-	APIKey     string `json:"api_key"`
-	Model      string `json:"model"`
-	SmallModel string `json:"small_model"`
+	Done          bool   `json:"setup_done,omitempty"`
+	Protocol      string `json:"protocol"`
+	BaseURL       string `json:"base_url"`
+	APIKey        string `json:"api_key"`
+	Model         string `json:"model"`
+	SmallModel    string `json:"small_model"`
+	DecisionModel string `json:"decision_model"`
 }
 
 func (c *Client) FetchSetup() (Setup, error) {

@@ -38,7 +38,8 @@ func TestSetupStepsInOrder(t *testing.T) {
 	m = fetched(m, []string{"a", "b"}, nil)
 	m = press(m, kDown, kEnter)                              // model：选 b
 	m = press(m, kDown, kDown, kEnter, kType("own"), kEnter) // small_model：手动输入
-	want := client.Setup{Protocol: "openai-chat", BaseURL: "http://x/v1", APIKey: "sk-1", Model: "b", SmallModel: "own"}
+	m = press(m, kEnter)                                     // decision_model：选 a
+	want := client.Setup{Protocol: "openai-chat", BaseURL: "http://x/v1", APIKey: "sk-1", Model: "b", SmallModel: "own", DecisionModel: "a"}
 	if got := m.values(); got != want {
 		t.Fatalf("走完 = %+v，想要 %+v", got, want)
 	}

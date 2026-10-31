@@ -99,7 +99,8 @@ class Agent {
 
   private:
     void loop();
-    StopVerdict judge();
+    bool decide();
+    std::string recap();
 
     /* 一趟的两条边沿：开跑上 run_mtx_，收工解锁并通知邻居。 */
     void start_run(std::unique_lock<std::mutex> &busy);
@@ -143,7 +144,7 @@ class Agent {
     ContextSession context_session_; // 增量上下文协议的状态（配置开关控制用不用）
 
     size_t run_begin_ = 0; // 这一趟开跑时历史的长度：收工判定的抄本从这里取
-    std::string recap_;    // 裁判写的 recap；没有裁判时为空
+    std::string recap_;    // 小模型写的 recap；没配小模型时为空
     int stall_ = 0;        // 连着几次打回后主模型仍一个工具都没调
     double run_cost_ = 0;  // 这一趟累计花费
     std::atomic<bool> abort_{false};

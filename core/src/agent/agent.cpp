@@ -2,6 +2,7 @@
 
 #include "agent/agents.hpp"
 
+#include "llm/systemone.hpp"
 #include "llm/transport.hpp"
 
 #include <cctype>
@@ -32,13 +33,6 @@ json tool_result_msg(const std::string &id, json content, bool is_error)
     json tb{{"type", "tool_result"}, {"tool_use_id", id}, {"content", std::move(content)}};
     if (is_error) tb["is_error"] = true;
     return json{{"role", "user"}, {"content", json::array({std::move(tb)})}};
-}
-
-/* 打回时递给主模型的话头。前缀让下一次判定认得出这是裁判说的，不是用户说的。 */
-std::string kickback(const std::string &reason)
-{
-    return std::string(kSupervisorTag) + (reason.empty() ? "This run is not finished yet." : reason) +
-           " Keep working on it. Do not start tasks the user did not request.";
 }
 
 /* 连着几次打回、主模型仍一个工具都没调，就强制收工：再问只是两个模型互相说话花钱。 */
@@ -386,26 +380,60 @@ void Agent::run_tools(const LlmOutcome &out)
     }
 }
 
-/* —— 收工判定（ADR-0025）——
- * 把这一趟的抄本交给小模型；请求不带工具，正文不推给客户端。
- * 没配小模型、调用失败都判收工：判不出来不该把人扣在循环里花钱。 */
-StopVerdict Agent::judge()
+/* —— 收工判定（ADR-0025、ADR-0032）——
+ * 第一步：问 revlm 的 System One 收不收工（decision_model）。没配、非 revlm、调用失败、
+ * 答案畸形都判收工：判不出来不该把人扣在循环里花钱。 */
+bool Agent::decide()
+{
+    const std::string model = ctx_.config->model(ModelTier::Decision);
+    if (model.empty() || ctx_.config->get("protocol") != "revlm") return true;
+    HttpRequest req = systemone_request(*ctx_.config, model, decision_state(messages_, run_begin_),
+                                        decision_questions());
+    req.timeout_s = kDecisionTimeoutS;
+    std::string body;
+    const SendResult r = send_revlm(req, [&body](std::string_view chunk) {
+        body.append(chunk);
+        return true; }, abort_);
+    const auto fail = [](const std::string &e) {
+        fprintf(stderr, "[agent] 收工判定失败，按收工处理：%s\n", e.c_str());
+        return true;
+    };
+    if (std::string e = http_status_error(r.status, r.error_body); !e.empty()) return fail(e);
+    if (!r.error.empty()) return fail(r.error);
+    const auto root = systemone_answers(body);
+    if (!root) return fail(root.error());
+
+    const json u = root->value("usage", json::object());
+    const double cost = ctx_.pricing ? ctx_.pricing->cost(model, {{"input", json_int(u, "input_tokens")},
+                                                                  {"output", json_int(u, "output_tokens")}})
+                                     : 0;
+    if (cost > 0)
+    {
+        run_cost_ += cost;
+        broadcast("status_update", json{{"cost", run_cost_}});
+    }
+    return decision_done((*root)["answers"]);
+}
+
+/* 第二步：收工时让小模型写 recap（强制收工也写）；请求不带工具，正文不推给客户端。
+ * 没配小模型就没有 recap（不回落主模型），调用失败也照样收工。 */
+std::string Agent::recap()
 {
     const std::string model = ctx_.config->model(ModelTier::Small);
-    if (model.empty()) return {}; // 没有裁判：不回落主模型
-    const json prompt = text_block(stop_verdict_prompt(run_transcript(messages_, run_begin_)));
+    if (model.empty()) return {};
+    const json prompt = text_block(recap_prompt(run_transcript(messages_, run_begin_)));
     const json d{{"model", model},
-                 {"system", stop_verdict_system()},
+                 {"system", recap_system()},
                  {"messages", json::array({json{{"role", "user"}, {"content", json::array({prompt})}}})}};
     LlmOutcome out;
     const bool ok = llm_call(d, out, /*silent=*/true);
     run_cost_ += out.cost;
     if (!ok)
     {
-        fprintf(stderr, "[agent] 收工判定失败，按收工处理：%s\n", out.error.c_str());
+        fprintf(stderr, "[agent] recap 失败，不写：%s\n", out.error.c_str());
         return {};
     }
-    return parse_stop_verdict(out.text);
+    return clip_recap(out.text);
 }
 
 /* 一圈一个 turn。等的是「有活干」：pending（上一圈没收工）或收件箱非空；都没有就是 idle。
@@ -436,7 +464,7 @@ void Agent::loop()
 
         broadcast("turn_start", json::object());
         LlmOutcome out;
-        // 主对话走增量上下文协议（配置开了才有会话）；judge() 那次调用不传
+        // 主对话走增量上下文协议（配置开了才有会话）；recap() 那次调用不传
         ContextSession *const cs =
             context_protocol_enabled(*ctx_.config) ? &context_session_ : nullptr;
         if (!llm_call(build_dialog(ModelTier::Main), out, /*silent=*/false, cs))
@@ -475,16 +503,17 @@ void Agent::loop()
 
         // 主模型没有下一步动作了：收不收工问裁判
         broadcast("turn_end", json{{"stop_reason", out.stop_reason}});
-        const StopVerdict v = judge();
+        const bool done = decide();
         if (interrupted()) continue;
-        if (!v.done && ++stall_ < kMaxStall)
+        if (!done && ++stall_ < kMaxStall)
         {
-            record_user(kickback(v.reason));
+            record_user(kKickback);
             pending = true;
             continue;
         }
-        if (!v.done) fprintf(stderr, "[agent] 连着 %d 轮没跑一个工具，强制收工\n", kMaxStall);
-        recap_ = v.recap;
+        if (!done) fprintf(stderr, "[agent] 连着 %d 轮没跑一个工具，强制收工\n", kMaxStall);
+        recap_ = recap();
+        if (interrupted()) continue;
         hooks_.run(HookEvent::Stop, {{"agent_id", id_}, {"cwd", workdir_}}, &abort_); // 只观察
     }
 }

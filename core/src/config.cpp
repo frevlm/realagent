@@ -126,10 +126,19 @@ bool Config::has(std::string_view key) const
     return settings_.contains(std::string(key));
 }
 
-// 档位间不回落：small_model 空就是空串
+// 档位间不回落：small_model / decision_model 空就是空串
 std::string Config::model(ModelTier tier) const
 {
-    return get(tier == ModelTier::Small ? "small_model" : "model");
+    switch (tier)
+    {
+        case ModelTier::Main:
+            return get("model");
+        case ModelTier::Small:
+            return get("small_model");
+        case ModelTier::Decision:
+            return get("decision_model");
+    }
+    return {};
 }
 
 bool Config::persist(std::string_view key, const nlohmann::json &v)
