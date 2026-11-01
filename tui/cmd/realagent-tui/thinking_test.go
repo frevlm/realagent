@@ -81,7 +81,7 @@ func TestRenderThinking(t *testing.T) {
 		client.Event{Type: "thinking_update", Payload: `{"delta":"先想一下"}`},
 		client.Event{Type: "message_update", Payload: `{"delta":"这是回答"}`},
 	)
-	view := m.sync().View()
+	view := m.View()
 	thinkBody := strings.Index(view, "先想一下")
 	answer := strings.Index(view, "这是回答")
 	if thinkBody < 0 || answer < 0 {

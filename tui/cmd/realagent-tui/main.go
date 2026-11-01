@@ -1,6 +1,6 @@
 // realagent-tui — 终端客户端（Bubble Tea，alternate screen，ADR-0020）
 //
-// POST /message 提交消息，回复与审批都走 /events 推送流。屏幕：历史进 viewport（可滚），
+// POST /message 提交消息，回复与审批都走 /events 推送流。屏幕：历史区（可滚），
 // 底下是审批框 + 子面板 + 斜杠菜单 + 读秒行 + 输入框 + 状态栏。
 // 用户看见的只有对话，没有 agent（ADR-0029）：只留当前那段对话的行流，换一段就丢掉、
 // 从 GET /session 重新读；它派生出去的子 agent 缩进成一行一条，挂在这段对话里。
@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/bubbletea"
 	"realagent/tui/internal/client"
 )
@@ -76,8 +75,8 @@ type model struct {
 	// 当前 agent 的行流（原始文本，不含 ANSI）。m.open 时末行仍在增长。
 	// 它是盘上会话的副本，切 agent 时丢掉重读。
 	lines     []line
-	open      bool // 末行是否还在流式增长
-	vp        viewport.Model
+	open      bool   // 末行是否还在流式增长
+	scroll    scroll // 历史区停在哪（render.go）
 	eventsCh  <-chan client.Event
 	ed        editor // 输入行编辑器
 	width     int
@@ -95,7 +94,6 @@ type model struct {
 
 func initialModel(c *client.Client) model {
 	m := model{client: c, sl: newStatusline()}
-	m.vp = viewport.New(0, 0)
 	m.emit("info", "连接 core (QUIC/HTTP3) — Enter 发送，Alt+Enter 换行，Esc 中断，Ctrl+C 退出")
 	return m
 }
@@ -170,36 +168,15 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client), fetchStatusCmd(m.client))
 }
 
-// Update 先跑业务，再把行流铺进 viewport。别处只管往 m.lines 追加。
+// Update 只跑业务，别处只管往 m.lines 追加；屏幕在 View 里按需取。
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
-	m = next
-	return m.sync(), cmd
+	return next, cmd
 }
 
-// sync 每帧全量重铺：折行是纯函数，增量维护要多一份会跟丢的状态。
-// 原本贴着底就继续贴底；用户滚上去了就不拽回来。
-func (m model) sync() model {
-	width := m.viewWidth()
-	h := m.height - len(m.chrome(width))
-	if h < 1 {
-		h = 1
-	}
-	atBottom := m.vp.AtBottom()
-	m.vp.Width, m.vp.Height = width, h
-	var rows []string
-	for _, l := range m.lines {
-		rows = append(rows, render(l, width)...)
-	}
-	// 不足一屏时在上方补空行：头几句贴着输入框
-	if pad := h - len(rows); pad > 0 {
-		rows = append(make([]string, pad), rows...)
-	}
-	m.vp.SetContent(strings.Join(rows, "\n"))
-	if atBottom {
-		m.vp.GotoBottom()
-	}
-	return m
+// histHeight 是历史区的高度：屏幕减去底下那块
+func (m model) histHeight(width int) int {
+	return max(1, m.height-len(m.chrome(width)))
 }
 
 // viewWidth 是折行用的宽度。尺寸还没到就按常规宽度画，下一帧校准
@@ -382,19 +359,22 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		if len(m.menuMatches()) > 0 {
 			return m.menuNav(v.String())
 		}
+		n := 3
 		if v.String() == "up" {
-			m.vp.LineUp(3)
-		} else {
-			m.vp.LineDown(3)
+			n = -3
 		}
+		w := m.viewWidth()
+		m.scrollBy(n, w, m.histHeight(w))
 		return m, nil
 
-	case "pgup":
-		m.vp.ViewUp()
-		return m, nil
-
-	case "pgdown":
-		m.vp.ViewDown()
+	case "pgup", "pgdown":
+		w := m.viewWidth()
+		h := m.histHeight(w)
+		n := h
+		if v.String() == "pgup" {
+			n = -h
+		}
+		m.scrollBy(n, w, h)
 		return m, nil
 
 	case "backspace":
@@ -582,6 +562,7 @@ func (m model) switchTo(sessionID string) (model, tea.Cmd) {
 func (m *model) reset() {
 	m.lines = nil
 	m.open = false
+	m.scroll = scroll{}
 	m.busy.stop()
 	m.awaiting = false
 }
@@ -782,7 +763,7 @@ func jsonUnmarshal(s string, v any) {
 
 // ==================== 渲染 ====================
 
-// chrome 是屏幕底下那块。viewport 高度 = 屏幕减去它，所以高度只在这里算。
+// chrome 是屏幕底下那块。历史区高度 = 屏幕减去它（histHeight）。
 func (m model) chrome(width int) []string {
 	// 历史与交互区之间留一行空白
 	rows := []string{""}
@@ -805,10 +786,12 @@ func (m model) chrome(width int) []string {
 	return rows
 }
 
-// View 画整个屏幕：历史（viewport）+ 底下那块。
+// View 画整个屏幕：历史区 + 底下那块。
 func (m model) View() string {
 	width := m.viewWidth()
-	return m.vp.View() + "\n" + strings.Join(m.chrome(width), "\n")
+	chrome := m.chrome(width)
+	hist := m.history(width, max(1, m.height-len(chrome)))
+	return strings.Join(hist, "\n") + "\n" + strings.Join(chrome, "\n")
 }
 
 // renderMenu 渲染斜杠命令菜单（输入行上方）：▸ 高亮当前项，条目多时按高亮开窗

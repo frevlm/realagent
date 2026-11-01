@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -65,41 +66,62 @@ func TestViewFillsScreenExactly(t *testing.T) {
 	for i := range 50 {
 		m.emit("assistant", strings.Repeat("长", 30)+string(rune('a'+i%26)))
 	}
-	m = m.sync()
 	if rows := strings.Split(m.View(), "\n"); len(rows) != m.height {
 		t.Errorf("整屏应正好 %d 行，got %d", m.height, len(rows))
 	}
 }
 
-// 历史多到几百屏，viewport 里也只铺得下一屏——行缓冲与 agent 数量无关（ADR-0020）
-func TestViewportShowsOneScreen(t *testing.T) {
+// 历史多到几百屏，屏上也只铺一屏：贴着底，看得见最新的，看不见最早的（ADR-0020）
+func TestHistoryShowsOneScreen(t *testing.T) {
 	m := testModel()
 	m.width, m.height = 40, 10
-	for i := range 500 {
-		m.emit("assistant", "第"+string(rune('a'+i%26))+"行")
+	m.emit("assistant", "最早的一行")
+	for range 500 {
+		m.emit("assistant", "中间")
 	}
-	m = m.sync()
-	if got := strings.Count(m.vp.View(), "\n") + 1; got != m.vp.Height {
-		t.Errorf("viewport 应只画 %d 行，got %d", m.vp.Height, got)
+	m.emit("assistant", "最新的一行")
+	screen := ansi.Strip(m.View())
+	if !strings.Contains(screen, "最新的一行") || strings.Contains(screen, "最早的一行") {
+		t.Errorf("屏上应只有最后一屏\n%s", screen)
 	}
 }
 
-// 新内容来了跟到底；用户自己滚上去了就别把他拽回来
+// 新内容来了跟到底；用户自己滚上去了就别把他拽回来，滚回底就接着跟
 func TestScrollStaysWhereUserPutIt(t *testing.T) {
 	m := testModel()
 	m.width, m.height = 40, 10
-	for range 50 {
-		m.emit("assistant", "一行")
+	for i := range 50 {
+		m.emit("assistant", fmt.Sprintf("第%d行", i))
 	}
-	m = m.sync()
-	if !m.vp.AtBottom() {
-		t.Fatal("默认应贴着底")
-	}
-	m.vp.LineUp(5)
+	w := m.viewWidth()
+	m.scrollBy(-5, w, m.histHeight(w))
+	before := m.View()
 	m.emit("assistant", "新来的一行")
-	m = m.sync()
-	if m.vp.AtBottom() {
-		t.Error("用户滚上去之后不该被新内容拽回底部")
+	if m.View() != before {
+		t.Error("用户滚上去之后，新内容不该挪动屏幕")
+	}
+	m.scrollBy(100, w, m.histHeight(w))
+	if !strings.Contains(m.View(), "新来的一行") {
+		t.Error("滚回底部应恢复跟随，看得见新内容")
+	}
+}
+
+// 滚到最顶就停在第一行，不越界
+func TestScrollStopsAtTop(t *testing.T) {
+	m := testModel()
+	m.width, m.height = 40, 10
+	m.emit("assistant", "第一行")
+	for range 50 {
+		m.emit("assistant", "后面")
+	}
+	w := m.viewWidth()
+	m.scrollBy(-1000, w, m.histHeight(w))
+	rows := strings.Split(ansi.Strip(m.View()), "\n")
+	if !strings.Contains(rows[0], "第一行") {
+		t.Errorf("滚到顶屏幕第一行应是最早的那行，got %q", rows[0])
+	}
+	if len(rows) != m.height {
+		t.Errorf("整屏应正好 %d 行，got %d", m.height, len(rows))
 	}
 }
 
@@ -124,7 +146,6 @@ func TestViewBlankLineBeforeInput(t *testing.T) {
 	m := testModel()
 	m.width, m.height = 40, 12
 	m.emit("assistant", "回答")
-	m = m.sync()
 	rows := strings.Split(m.View(), "\n")
 	in := len(rows) - 1
 	if ansi.Strip(rows[in-1]) != "" {

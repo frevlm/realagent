@@ -4,7 +4,7 @@
 // altscreen 之后屏幕每帧全量重绘（ADR-0020），所以断言的是**最后一帧**：
 // 输出流里前面那些是被覆盖掉的中间帧，拿整个流去数出现次数只会数到重绘次数。
 //
-// 单元测试只能证明行流对；这一层证明 viewport 通路对。
+// 单元测试只能证明行流对；这一层证明历史区通路对。
 package main
 
 import (
@@ -95,7 +95,6 @@ func TestAltscreenNoDuplicateLines(t *testing.T) {
 	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"问一句"}`})
 	m.handleEvent(client.Event{Type: "message_update", Payload: `{"delta":"答一句"}`})
 	m.closeLine()
-	m = m.sync()
 
 	screen := ansi.Strip(m.View())
 	for _, want := range []string{"问一句", "答一句"} {
