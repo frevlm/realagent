@@ -17,6 +17,7 @@
 #include "agent/command.hpp"
 #include "agent/session.hpp"
 #include "config.hpp"
+#include "llm/transport.hpp"
 #include "mcp/mcp.hpp"
 #include "server/server.hpp"
 
@@ -86,7 +87,10 @@ int main()
     };
 
     // 端点没配齐也照常起：这段话会原样回给每一条 POST /message，出现在用户眼前
-    if (const std::string e = endpoint_config_error(cfg); !e.empty()) fprintf(stderr, "[config] %s\n", e.c_str());
+    if (const std::string e = endpoint_config_error(cfg); !e.empty())
+        fprintf(stderr, "[config] %s\n", e.c_str());
+    else if (context_protocol_enabled(cfg))
+        preconnect_revlm(cfg.get("base_url"));
 
     ApprovalCoordinator approval;
     // 一组 agent 的事件只推给那个客户端，审批也只问它（ADR-0021）

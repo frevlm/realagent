@@ -34,4 +34,7 @@ struct SendResult {
 SendResult send_curl(const HttpRequest &req, const BodySink &sink, const std::atomic<bool> &abort);
 SendResult send_revlm(const HttpRequest &req, const BodySink &sink, const std::atomic<bool> &abort);
 
+/* 不阻塞：在 net 线程上建好到 base_url 的连接，首个 send_revlm 不再付握手。建不成只记一行日志。 */
+void preconnect_revlm(const std::string &base_url);
+
 } // namespace realagent

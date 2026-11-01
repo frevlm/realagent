@@ -207,6 +207,28 @@ net::Task<void> run(net::Client &client, NetCall &c)
     c.done.set_value();
 }
 
+/* 连接空闲 15s 发 PING，再 10s 什么都没收到就判死：挂在上面的流立刻报错，下一次调用重新建连。
+ * PING 只到 CF 边缘（h2 逐跳），不进 revlm；判死只关连接、不重发请求——请求一旦发出，
+ * 上游照样生成照样计费，重发就是两份钱。 */
+net::Config link_config()
+{
+    net::Config cfg;
+    cfg.keepalive_interval = 15s;
+    cfg.keepalive_timeout = 10s;
+    return cfg;
+}
+
+net::Task<void> warm(net::Client &client, std::string url)
+{
+    try
+    {
+        co_await client.connect(std::move(url));
+    } catch (const std::exception &e)
+    {
+        fprintf(stderr, "[transport] 预连 revlm 失败（%s），首个请求再连\n", e.what());
+    }
+}
+
 /* 进程里一条 net 线程：一个 EventLoop + 一个 Client，所有 agent 的 revlm 调用都多路复用在
  * 它的连接上。loop 一直在跑，空闲连接的 PING / GOAWAY / 断开都有人处理。 */
 class Link {
@@ -216,7 +238,7 @@ class Link {
         std::promise<void> ready;
         th_ = std::thread([this, &ready] {
             net::EventLoop loop;
-            net::Client client(loop);
+            net::Client client(loop, link_config());
             loop_ = &loop;
             client_ = &client;
             ready.set_value();
@@ -238,11 +260,23 @@ class Link {
         done.wait();
     }
 
+    /* 建好到 url 所在 origin 的连接就返回，不发请求、不等结果。 */
+    void preconnect(std::string url)
+    {
+        loop_->post([this, url = std::move(url)]() mutable { loop_->spawn(warm(*client_, std::move(url))); });
+    }
+
   private:
     std::thread th_;
     net::EventLoop *loop_ = nullptr;
     net::Client *client_ = nullptr;
 };
+
+Link &link()
+{
+    static Link l;
+    return l;
+}
 
 } // namespace
 
@@ -278,10 +312,9 @@ SendResult send_curl(const HttpRequest &req, const BodySink &sink, const std::at
 
 SendResult send_revlm(const HttpRequest &req, const BodySink &sink, const std::atomic<bool> &abort)
 {
-    static Link link;
     NetCall c{.req = req, .sink = sink, .abort = abort};
     if (req.timeout_s > 0) c.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(req.timeout_s);
-    link.call(c);
+    link().call(c);
     if (c.not_h2)
     {
         fprintf(stderr, "[transport] revlm::net 跟 %s 说不上 h2（%s），本次退回 curl\n", req.url.c_str(),
@@ -289,6 +322,11 @@ SendResult send_revlm(const HttpRequest &req, const BodySink &sink, const std::a
         return send_curl(req, sink, abort);
     }
     return std::move(c.r);
+}
+
+void preconnect_revlm(const std::string &base_url)
+{
+    if (!base_url.empty()) link().preconnect(base_url);
 }
 
 } // namespace realagent
