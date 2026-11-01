@@ -77,6 +77,7 @@ type model struct {
 	lines     []line
 	open      bool   // 末行是否还在流式增长
 	scroll    scroll // 历史区停在哪（render.go）
+	pace      pacer  // 推送流的节拍器（pace.go）
 	eventsCh  <-chan client.Event
 	ed        editor // 输入行编辑器
 	width     int
@@ -216,8 +217,11 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		return m, nil
 
 	case eventMsg:
-		cmd := m.handleEvent(client.Event(v))
+		cmd := m.enqueue(client.Event(v), time.Now())
 		return m, tea.Batch(cmd, waitEventCmd(m.eventsCh))
+
+	case paceMsg:
+		return m, m.onPace(time.Time(v))
 
 	case tea.KeyMsg:
 		return m.handleKey(v)
@@ -337,7 +341,7 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		case len(m.menuMatches()) > 0:
 			m.menuHid = true // 只收菜单，不清输入
 		case m.busy.active:
-			return m, interruptCmd(m.client)
+			return m, tea.Batch(m.flush(), interruptCmd(m.client))
 		}
 		return m, nil
 
@@ -588,11 +592,7 @@ func (m model) decideApproval(allow bool) (model, tea.Cmd) {
 func (m *model) handleEvent(ev client.Event) tea.Cmd {
 	// 每帧带 root（哪段对话）与 session_id（谁说的）。只留当前这段的；审批例外，不管在看哪段都要弹。
 	// 没有 root 的帧是进程级的（statusline）或回放出来的（已经按对话取过了）。
-	var who struct {
-		SessionID string `json:"session_id"`
-		Root      string `json:"root"`
-	}
-	jsonUnmarshal(ev.Payload, &who)
+	who := whoOf(ev.Payload)
 	cur := m.client.SessionID()
 	switch {
 	case ev.Type == "permission_request" || who.Root == "":
@@ -746,6 +746,24 @@ func (m *model) subEvent(ev client.Event) {
 	case "agent_end":
 		m.emit("sub", "  ↳ 子任务收工")
 	}
+}
+
+// who 是一帧的出处：哪段对话（root）、谁说的（session_id）
+type origin struct {
+	SessionID string `json:"session_id"`
+	Root      string `json:"root"`
+}
+
+func whoOf(payload string) origin {
+	var w origin
+	jsonUnmarshal(payload, &w)
+	return w
+}
+
+// mine 是这帧是否出自当前对话本身（不是子任务，也不是别段对话）
+func (m *model) mine(ev client.Event) bool {
+	w := whoOf(ev.Payload)
+	return w.Root == m.client.SessionID() && w.SessionID == w.Root
 }
 
 // deltaOf 取事件载荷里的 delta 字段（message_update / thinking_update 同构）

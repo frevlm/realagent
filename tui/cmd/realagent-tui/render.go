@@ -113,7 +113,18 @@ func fit(s string, width int) string {
 
 // layout 把一行折成未着色的渲染行
 func layout(l line, width int) []string {
-	return wrapText(prefixOf(l.role), l.text, width)
+	return wrapText(prefixOf(l.role), printable(l.text), width)
+}
+
+// printable 把终端会自己解释的两种控制符摊平，折行算的宽才是上屏的宽：
+// \t 折行时按 0 宽算、上屏却占好几格，超宽的行会被渲染器截掉；
+// \r 把光标拽回行首，后面的字盖掉前面的——照终端的样子只留最后一个 \r 之后的（CRLF 的 \r 先剥掉）。
+func printable(s string) string {
+	s = strings.TrimRight(s, "\r")
+	if i := strings.LastIndexByte(s, '\r'); i >= 0 {
+		s = s[i+1:]
+	}
+	return strings.ReplaceAll(s, "\t", "    ")
 }
 
 // render 把一行折成着色后的渲染行
