@@ -16,6 +16,8 @@ namespace {
 std::string clip(std::string s, size_t cap)
 {
     if (s.size() <= cap) return s;
+    // 退到字符边界：从 UTF-8 续字节（10xxxxxx）处切开，json::dump 会抛异常
+    while (cap > 0 && (static_cast<unsigned char>(s[cap]) & 0xC0) == 0x80) --cap;
     s.resize(cap);
     s += "…(truncated)";
     return s;

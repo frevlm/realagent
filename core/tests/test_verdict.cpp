@@ -169,6 +169,21 @@ int main()
     {
         CHECK(clip_recap("改了 README") == "改了 README", "recap 原文照留");
         CHECK(clip_recap(std::string(kRecapCap + 1, 'r')) == std::string(kRecapCap, 'r') + "…(truncated)", "超长截断并说明");
+
+        // 截点落在多字节字符中间的三种对齐：都退到字符边界，结果仍是合法 UTF-8
+        std::string zh;
+        while (zh.size() <= kRecapCap) zh += "中";
+        for (const char *lead : {"", "a", "aa"})
+        {
+            std::string out;
+            try
+            {
+                out = nlohmann::json(clip_recap(lead + zh)).dump();
+            } catch (const nlohmann::json::exception &)
+            {
+            }
+            CHECK(has(out, "中…(truncated)"), "中文按字符截断，dump 得出来");
+        }
     }
 
     printf(failures ? "\nFAILED (%d)\n" : "\nALL PASS\n", failures);
