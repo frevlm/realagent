@@ -1,8 +1,7 @@
 // realagent-tui — 终端客户端（Bubble Tea，alternate screen，ADR-0020）
 //
-// POST /message 提交消息，回复与审批都走 /events 推送流。屏幕：历史区（可滚），
-// 底下是审批框 + 子面板 + 斜杠菜单 + 读秒行 + 输入框 + 状态栏。
-// 用户看见的只有对话，没有 agent（ADR-0029）：只留当前那段对话的行流，换一段就丢掉、
+// POST /message 提交消息，回复与审批都走 /events 推送流。屏幕布局见 view.go。
+// 用户看见的只有对话，没有 agent（ADR-0029）：只留当前那段对话的条目，换一段就丢掉、
 // 从 GET /session 重新读；它派生出去的子 agent 缩进成一行一条，挂在这段对话里。
 package main
 
@@ -13,47 +12,49 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"realagent/tui/internal/client"
 )
 
-// ==================== 事件订阅（推送流 → tea.Msg） ====================
+// ==================== 推送流与后台请求 → tea.Msg ====================
 
-type eventsReady struct{ ch <-chan client.Event }
-type eventMsg client.Event
+type eventMsg client.Frame
 type eventsDone struct{}
 
-// commandsMsg 携带 GET /commands 的拉取结果（斜杠菜单数据源）
-type commandsMsg struct {
-	cmds []client.Command
-	err  error
-}
-
-// 启动事件订阅：Init 返回此 cmd，goroutine 持续读推送流
-func subscribeCmd(c *client.Client) tea.Cmd {
-	return func() tea.Msg {
-		ch := make(chan client.Event)
+// pump 把推送流喂给程序；断了就隔一秒用同一个 clientID 重连
+func pump(c *client.Client, p *tea.Program) {
+	for {
+		ch := make(chan client.Frame)
 		go c.SubscribeEvents(ch)
-		return eventsReady{ch: ch}
+		for f := range ch {
+			p.Send(eventMsg(f))
+		}
+		p.Send(eventsDone{})
+		time.Sleep(time.Second)
 	}
 }
 
-// 等待下一条事件（Bubble Tea 循环）
-func waitEventCmd(ch <-chan client.Event) tea.Cmd {
+// commandsMsg 携带 GET /commands 的拉取结果（斜杠菜单数据源）
+type commandsMsg []client.Command
+
+// failMsg 是一次后台请求的失败原话，落进对话
+type failMsg string
+
+// try 跑一次只关心成败的请求：失败就带回 what + 原因
+func try(what string, f func() error) tea.Cmd {
 	return func() tea.Msg {
-		ev, ok := <-ch
-		if !ok {
-			return eventsDone{}
+		if err := f(); err != nil {
+			return failMsg(what + ": " + err.Error())
 		}
-		return eventMsg(ev)
+		return nil
 	}
 }
 
 // 拉取斜杠命令列表（失败就没有菜单）。plugin 命令跟着工作目录走。
 func fetchCommandsCmd(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
-		cmds, err := c.FetchCommands()
-		return commandsMsg{cmds: cmds, err: err}
+		cmds, _ := c.FetchCommands()
+		return commandsMsg(cmds)
 	}
 }
 
@@ -71,15 +72,12 @@ type pendingApproval struct {
 const menuMaxRows = 8
 
 type model struct {
-	client *client.Client
-	// 当前 agent 的行流（原始文本，不含 ANSI）。m.open 时末行仍在增长。
-	// 它是盘上会话的副本，切 agent 时丢掉重读。
-	lines     []line
-	open      bool   // 末行是否还在流式增长
-	scroll    scroll // 历史区停在哪（render.go）
-	pace      pacer  // 推送流的节拍器（pace.go）
-	eventsCh  <-chan client.Event
-	ed        editor // 输入行编辑器
+	client    *client.Client
+	tr        transcript // 当前那段对话（transcript.go）
+	scroll    scroll     // 历史区停在哪（render.go）
+	expand    bool       // 工具输出全部展开（ctrl+o）
+	pace      pacer      // 推送流的节拍器（pace.go）
+	ed        editor     // 输入框（input.go）
 	width     int
 	height    int
 	approval  *pendingApproval // 非 nil = 审批模态（忽略除 y/n 外按键）
@@ -95,7 +93,7 @@ type model struct {
 
 func initialModel(c *client.Client) model {
 	m := model{client: c, sl: newStatusline()}
-	m.emit("info", "连接 core (QUIC/HTTP3) — Enter 发送，Alt+Enter 换行，Esc 中断，Ctrl+C 退出")
+	m.emit(kindInfo, "Enter 发送，Alt+Enter 换行，Esc 中断，Ctrl+O 展开工具输出，Ctrl+C 退出")
 	return m
 }
 
@@ -112,53 +110,32 @@ func sendCmd(c *client.Client, input string) tea.Cmd {
 	}
 }
 
-// historyMsg 携带 GET /session 的回放帧
+// historyMsg 携带 GET /session 的回放帧，连同是哪段对话的：回来时用户可能已经换走了
 type historyMsg struct {
 	sessionID string
 	frames    []client.Frame
-	err       error
 }
 
-// fetchHistoryCmd 拉一段对话的历史，带回 sessionID：回来时用户可能已经换走了
 func fetchHistoryCmd(c *client.Client, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		f, err := c.FetchSession(sessionID)
-		return historyMsg{sessionID: sessionID, frames: f, err: err}
+		if err != nil {
+			return failMsg("读历史失败: " + err.Error())
+		}
+		return historyMsg{sessionID, f}
 	}
 }
 
 // sessionsMsg 携带 GET /sessions 的对话清单
-type sessionsMsg struct {
-	list []client.SessionInfo
-	err  error
-}
+type sessionsMsg []client.SessionInfo
 
 func fetchSessionsCmd(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
 		l, err := c.FetchSessions()
-		return sessionsMsg{list: l, err: err}
-	}
-}
-
-// interruptMsg 携带 POST /interrupt 的结果
-type interruptMsg struct {
-	err error
-}
-
-func interruptCmd(c *client.Client) tea.Cmd {
-	return func() tea.Msg {
-		return interruptMsg{err: c.Interrupt()}
-	}
-}
-
-// approvalResp 携带 POST /approval-response 的回传结果
-type approvalResp struct {
-	err error
-}
-
-func approvalCmd(c *client.Client, id string, allow bool) tea.Cmd {
-	return func() tea.Msg {
-		return approvalResp{err: c.RespondApproval(id, allow)}
+		if err != nil {
+			return failMsg("取对话清单失败: " + err.Error())
+		}
+		return sessionsMsg(l)
 	}
 }
 
@@ -166,26 +143,13 @@ func approvalCmd(c *client.Client, id string, allow bool) tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	// 起步是一段新对话：还没说过话，没有历史可读
-	return tea.Batch(subscribeCmd(m.client), fetchCommandsCmd(m.client), fetchStatusCmd(m.client))
+	return tea.Batch(fetchCommandsCmd(m.client), fetchStatusCmd(m.client))
 }
 
-// Update 只跑业务，别处只管往 m.lines 追加；屏幕在 View 里按需取。
+// Update 只跑业务，别处只管往对话里追加；屏幕在 View 里按需取。
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
 	return next, cmd
-}
-
-// histHeight 是历史区的高度：屏幕减去底下那块
-func (m model) histHeight(width int) int {
-	return max(1, m.height-len(m.chrome(width)))
-}
-
-// viewWidth 是折行用的宽度。尺寸还没到就按常规宽度画，下一帧校准
-func (m model) viewWidth() int {
-	if m.width <= 0 {
-		return 80
-	}
-	return m.width
 }
 
 func (m model) update(msg tea.Msg) (model, tea.Cmd) {
@@ -195,57 +159,54 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		m.height = v.Height
 		return m, nil
 
-	case eventsReady:
-		m.eventsCh = v.ch
-		return m, waitEventCmd(m.eventsCh)
-
-	case eventsDone:
+	case eventsDone: // 断线：pump 在重连
 		m.busy.stop()
-		return m, subscribeCmd(m.client) // 断线重连
+		return m, nil
 
 	case tickMsg:
 		return m, m.busy.tick(v)
 
 	case commandsMsg:
-		if v.err == nil {
-			m.commands = v.cmds
-		}
+		m.commands = v
 		return m, nil
 
-	case statusMsg:
-		m.sl.model = v.model
+	case failMsg:
+		m.emit(kindError, string(v))
 		return m, nil
 
 	case eventMsg:
-		cmd := m.enqueue(client.Event(v), time.Now())
-		return m, tea.Batch(cmd, waitEventCmd(m.eventsCh))
+		return m, m.enqueue(client.Frame(v), time.Now())
 
 	case paceMsg:
 		return m, m.onPace(time.Time(v))
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(v)
 
+	case tea.PasteMsg:
+		// 粘贴整块原样插入（含换行），不当按键解释；模态开着时不收
+		if m.approval == nil && m.panel == nil {
+			m.ed.insert(v.Content)
+			m.menuHid = false
+		}
+		return m, nil
+
 	case sendMsg:
-		// 普通消息回 processing，回复走推送流；这里只处理失败与斜杠命令结果
-		if !m.awaiting {
+		// 普通消息回 processing，回复走推送流；这里只收失败与斜杠命令的结果，收到即收工
+		if !m.awaiting || v.err == nil && v.reply.Error == "" && !v.reply.Ok {
 			return m, nil
 		}
+		m.awaiting = false
+		m.busy.stop()
 		switch {
 		case v.err != nil:
-			m.emit("error", "发送失败: "+v.err.Error())
-			m.awaiting = false
-			m.busy.stop()
+			m.emit(kindError, "发送失败: "+v.err.Error())
 		case v.reply.Error != "":
-			m.emit("error", v.reply.Error)
-			m.awaiting = false
-			m.busy.stop()
-		case v.reply.Ok:
-			m.awaiting = false
-			m.busy.stop() // 命令不启动 agent turn，收到结果即收工
+			m.emit(kindError, v.reply.Error)
+		default:
 			// 无参的 /model 是要选一个：做成子面板，造不出才退回文本
 			if m.panelWant == v.reply.Command {
-				if p := makePanel(v.reply.Command, v.reply.Data); p != nil {
+				if p := modelPanel(v.reply.Data); p != nil {
 					m.panel = p
 					return m, nil
 				}
@@ -257,7 +218,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			case "plugins":
 				text = renderPlugins(v.reply.Data)
 			}
-			m.emit("info", text)
+			m.emit(kindInfo, text)
 		}
 		return m, nil
 
@@ -266,37 +227,17 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		if v.sessionID != m.client.SessionID() {
 			return m, nil
 		}
-		if v.err != nil {
-			m.emit("error", "读历史失败: "+v.err.Error())
-			return m, nil
-		}
-		// 回放帧与实时帧同形，走同一个渲染器
+		// 回放帧与实时帧同形，走同一段代码
 		for _, f := range v.frames {
-			m.handleEvent(client.Event{Type: f.Type, Payload: string(f.Data)})
+			m.handleEvent(f)
 		}
-		m.closeLine()
+		m.tr.close()
 		m.busy.stop() // 别让历史里的 turn_start 点着读秒行
 		return m, nil
 
 	case sessionsMsg:
-		if v.err != nil {
-			m.emit("error", "取对话清单失败: "+v.err.Error())
-			return m, nil
-		}
-		if m.panel = sessionPanel(v.list, m.client.SessionID()); m.panel == nil {
-			m.emit("info", "📄 这个目录下还没有对话")
-		}
-		return m, nil
-
-	case interruptMsg:
-		if v.err != nil {
-			m.emit("error", "中断请求失败: "+v.err.Error())
-		}
-		return m, nil
-
-	case approvalResp:
-		if v.err != nil {
-			m.emit("error", "审批回传失败: "+v.err.Error())
+		if m.panel = sessionPanel(v, m.client.SessionID()); m.panel == nil {
+			m.emit(kindInfo, "📄 这个目录下还没有对话")
 		}
 		return m, nil
 	}
@@ -308,7 +249,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 // handleKey 处理按键。审批模态下只响应 y/n（a/d）与 ctrl+c，其余忽略。
 // 子面板模态下只响应 ↑/↓、Enter、Esc 与 ctrl+c。
 // 斜杠菜单（输入以 '/' 开头）时：↑/↓ 移动高亮、Tab 补全、Enter 执行、Esc 收起。
-func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
+func (m model) handleKey(v tea.KeyPressMsg) (model, tea.Cmd) {
 	if m.approval != nil {
 		switch v.String() {
 		case "ctrl+c":
@@ -325,13 +266,6 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		return m.panelKey(v.String())
 	}
 
-	// 粘贴：整块原样插入（含换行），不当按键解释
-	if v.Paste {
-		m.ed.insert(string(v.Runes))
-		m.menuHid = false
-		return m, nil
-	}
-
 	switch v.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -341,7 +275,7 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		case len(m.menuMatches()) > 0:
 			m.menuHid = true // 只收菜单，不清输入
 		case m.busy.active:
-			return m, tea.Batch(m.flush(), interruptCmd(m.client))
+			return m, tea.Batch(m.flush(), try("中断请求失败", m.client.Interrupt))
 		}
 		return m, nil
 
@@ -357,6 +291,10 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 	case "tab":
 		return m.menuNav("tab")
 
+	case "ctrl+o":
+		m.expand = !m.expand
+		return m, nil
+
 	case "up", "down":
 		// 菜单开着归菜单，否则滚动。不开 mouse mode（会关掉终端的选中复制），
 		// 终端的 alternate scroll 会把滚轮转成方向键送到这里
@@ -367,18 +305,15 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		if v.String() == "up" {
 			n = -3
 		}
-		w := m.viewWidth()
-		m.scrollBy(n, w, m.histHeight(w))
+		m.scrollBy(n)
 		return m, nil
 
-	case "pgup", "pgdown":
-		w := m.viewWidth()
-		h := m.histHeight(w)
-		n := h
-		if v.String() == "pgup" {
-			n = -h
-		}
-		m.scrollBy(n, w, h)
+	case "pgup":
+		m.scrollBy(-m.histHeight())
+		return m, nil
+
+	case "pgdown":
+		m.scrollBy(m.histHeight())
 		return m, nil
 
 	case "backspace":
@@ -401,19 +336,10 @@ func (m model) handleKey(v tea.KeyMsg) (model, tea.Cmd) {
 		m.ed.killWord()
 
 	default:
-		if v.Type == tea.KeyRunes && len(v.Runes) > 0 {
-			m.ed.insert(string(v.Runes))
-		} else if v.Type == tea.KeySpace {
-			m.ed.insert(" ")
-		}
+		m.ed.insert(v.Text) // 没有字面的组合键 Text 为空，插入即无事
 	}
 	m.menuHid = false // 任何编辑都让菜单复原
 	return m, nil
-}
-
-// menuOpen 判断斜杠菜单是否激活（输入以 '/' 开头且未被 esc 收起）
-func (m model) menuOpen() bool {
-	return !m.menuHid && strings.HasPrefix(m.ed.value(), "/")
 }
 
 // localCmds 是不经 core 的斜杠命令：合进菜单，在 submitInput 里就地处理。
@@ -425,13 +351,10 @@ var localCmds = []client.Command{
 }
 
 // menuMatches 返回当前输入前缀命中的命令（命令名不带 '/'，前缀匹配）。
-// 输入含空格视为进入参数模式（v1 命令无参数），关闭菜单。
+// 菜单只在输入以 '/' 开头、没被 esc 收起时开；输入含空白视为进入参数，关闭菜单。
 func (m model) menuMatches() []client.Command {
-	if !m.menuOpen() {
-		return nil
-	}
-	prefix := m.ed.value()[1:]
-	if strings.ContainsAny(prefix, " \n") {
+	prefix, ok := strings.CutPrefix(m.ed.value(), "/")
+	if m.menuHid || !ok || strings.ContainsAny(prefix, " \n") {
 		return nil
 	}
 	all := make([]client.Command, 0, len(m.commands)+len(localCmds))
@@ -510,39 +433,32 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	m.panelWant = panelWantOf(input, fromPanel)
 	// 只回显斜杠命令：普通消息由 core 的 message_start 帧画
 	if strings.HasPrefix(input, "/") {
-		m.emit("user", input)
+		m.emit(kindUser, input)
 	}
 
-	// 以下几条是纯客户端命令
-	if cmd, _ := splitCommand(input); cmd == "/quit" {
+	// 以下几条是纯客户端命令。换对话不需要 core 做任何事：下一条消息带哪个 session_id 而已
+	switch cmd, rest := splitCommand(input); {
+	case cmd == "/quit":
 		return m, tea.Quit
-	}
-
-	if cmd, rest := splitCommand(input); cmd == "/statusline" {
-		if rest == "" {
-			m.panel = m.sl.panel() // 无参 = 开面板选，面板本身就是配置一览
-			return m, nil
-		}
+	case cmd == "/statusline" && rest == "":
+		m.panel = m.sl.panel() // 无参 = 开面板选，面板本身就是配置一览
+		return m, nil
+	case cmd == "/statusline":
 		var msg string
 		m.sl, msg = m.sl.applyStatuslineCmd(rest)
-		m.emit("info", msg)
+		m.emit(kindInfo, msg)
 		if m.panelWant == "statusline" {
 			m.panel = m.sl.panel() // 面板里改的，改完还留在面板里接着改
 		}
 		return m, nil
-	}
-
-	// 换对话不需要 core 做任何事：下一条消息带哪个 session_id 而已
-	if cmd, _ := splitCommand(input); cmd == "/new" {
+	case cmd == "/new":
 		m.client.Fresh()
 		m.reset()
-		m.emit("info", "✨ 新对话")
+		m.emit(kindInfo, "✨ 新对话")
 		return m, nil
-	}
-	if cmd, rest := splitCommand(input); cmd == "/resume" {
-		if rest == "" {
-			return m, fetchSessionsCmd(m.client)
-		}
+	case cmd == "/resume" && rest == "":
+		return m, fetchSessionsCmd(m.client)
+	case cmd == "/resume":
 		return m.switchTo(rest)
 	}
 
@@ -551,7 +467,7 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 	return m, tea.Batch(sendCmd(m.client, input), m.busy.begin("发送中", time.Now()))
 }
 
-// switchTo 换一段对话：丢掉当前行流，从 GET /session 重读。
+// switchTo 换一段对话：丢掉当前条目，从 GET /session 重读。
 // 原来那段在 core 里照跑，回来时从盘上读得到。
 func (m model) switchTo(sessionID string) (model, tea.Cmd) {
 	if sessionID == m.client.SessionID() {
@@ -562,10 +478,9 @@ func (m model) switchTo(sessionID string) (model, tea.Cmd) {
 	return m, fetchHistoryCmd(m.client, sessionID)
 }
 
-// reset 丢掉当前对话的行流与读秒
+// reset 丢掉当前对话的条目与读秒
 func (m *model) reset() {
-	m.lines = nil
-	m.open = false
+	m.tr = transcript{}
 	m.scroll = scroll{}
 	m.busy.stop()
 	m.awaiting = false
@@ -574,52 +489,48 @@ func (m *model) reset() {
 // decideApproval 处理审批裁决：记录结果 → 退出审批模态 → 回传 core
 func (m model) decideApproval(allow bool) (model, tea.Cmd) {
 	p := m.approval
-	if p == nil {
-		return m, nil
-	}
 	verdict := "已拒绝"
 	if allow {
 		verdict = "已允许"
 	}
-	m.emit("info", fmt.Sprintf("🔐 %s工具 %s", verdict, p.tool))
+	m.emit(kindInfo, fmt.Sprintf("🔐 %s工具 %s", verdict, p.tool))
 	m.approval = nil
-	return m, tea.Batch(approvalCmd(m.client, p.id, allow), m.busy.begin("执行工具", time.Now()))
+	respond := func() error { return m.client.RespondApproval(p.id, allow) }
+	return m, tea.Batch(try("审批回传失败", respond), m.busy.begin("执行工具", time.Now()))
 }
 
 // ==================== 事件 ====================
 
-// handleEvent 处理推送流事件，返回需要执行的 tea.Cmd（读秒计时循环的启动）
-func (m *model) handleEvent(ev client.Event) tea.Cmd {
+// emit 往对话里追加一条完整的
+func (m *model) emit(k *kind, text string) { m.tr.push(item{kind: k}).write(text) }
+
+// handleEvent 处理一帧，返回需要执行的 tea.Cmd（读秒计时循环的启动）
+func (m *model) handleEvent(f client.Frame) tea.Cmd {
 	// 每帧带 root（哪段对话）与 session_id（谁说的）。只留当前这段的；审批例外，不管在看哪段都要弹。
 	// 没有 root 的帧是进程级的（statusline）或回放出来的（已经按对话取过了）。
-	who := whoOf(ev.Payload)
 	cur := m.client.SessionID()
 	switch {
-	case ev.Type == "permission_request" || who.Root == "":
-	case who.Root != cur:
+	case f.Event == "permission_request" || f.Root == "":
+	case f.Root != cur:
 		return nil
-	case who.SessionID != who.Root:
-		m.subEvent(ev)
+	case f.SessionID != f.Root:
+		m.subEvent(f)
 		return nil
 	}
 
-	switch ev.Type {
+	switch f.Event {
 	case "turn_start":
 		return m.busy.begin("思考中", time.Now())
 
 	case "message_start":
 		// 收件箱三种来源都是 user；用户自己打的那条也从这里画
-		var d struct {
-			Text string `json:"text"`
-		}
-		jsonUnmarshal(ev.Payload, &d)
-		if d.Text != "" {
-			m.emit("user", d.Text)
+		if f.Text != "" {
+			m.emit(kindUser, f.Text)
 		}
 
 	case "message_update":
 		m.awaiting = false
-		m.stream("assistant", deltaOf(ev.Payload))
+		m.tr.stream(kindAssistant, f.Delta)
 		return m.busy.begin("生成回复", time.Now())
 
 	case "thinking_start":
@@ -627,208 +538,105 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 
 	case "thinking_update":
 		m.awaiting = false
-		// 思考块头部只在真有内容时冒出来（空的 thinking_start 不留痕）
-		if !m.open || len(m.lines) == 0 || m.lines[len(m.lines)-1].role != "thinking" {
-			m.emit("info", "💭 思考过程")
-		}
-		m.stream("thinking", deltaOf(ev.Payload))
+		m.tr.stream(kindThinking, f.Delta)
 		return m.busy.begin("思考中", time.Now())
 
-	case "thinking_stop":
-		m.closeLine()
+	case "message_end", "thinking_stop":
+		m.tr.close()
 
 	case "statusline":
 		// 与 GET /statusline 同一份载荷，覆盖写
-		var d client.Statusline
-		jsonUnmarshal(ev.Payload, &d)
-		m.sl.model = d.Model
+		m.sl.model = f.Model
 
 	case "status_update":
-		// 本次 run 累计的绝对值，覆盖写
-		jsonUnmarshal(ev.Payload, &m.busy.cost)
+		// 本次 run 累计的绝对值，覆盖写。算不出钱时帧里不带 cost，解出来的 0 就是"没数据"，不覆盖
+		if f.Cost != 0 {
+			m.busy.cost = f.Cost
+		}
 
 	case "tool_execution_start":
-		var d struct {
-			Name string `json:"name"`
-		}
-		jsonUnmarshal(ev.Payload, &d)
 		m.awaiting = false
-		m.emit("tool", "🔧 "+d.Name+" …")
-		return m.busy.begin(toolVerb(d.Name), time.Now())
+		m.tr.call(f.ID).name = f.Name
+		return m.busy.begin(toolVerb(f.Name), time.Now())
 
 	case "tool_output":
-		// 工具边跑边推的输出。走 stream（续写开着的行）：末行可能没有换行符
-		var d struct {
-			Text string `json:"text"`
-		}
-		jsonUnmarshal(ev.Payload, &d)
+		// 工具边跑边推的输出，挂到它那次调用下面。一帧不一定是一整行，续写即可
 		m.awaiting = false
-		m.stream("output", d.Text)
+		m.tr.call(f.CallID).write(f.Text)
 
 	case "tool_execution_end":
-		var d struct {
-			Name   string `json:"name"`
-			Status int    `json:"status"`
+		c := m.tr.call(f.ID)
+		c.name, c.state = f.Name, toolOK
+		if f.Status != 0 {
+			c.state = toolFailed
 		}
-		jsonUnmarshal(ev.Payload, &d)
-		mark := "✓"
-		if d.Status != 0 {
-			mark = "✗"
-		}
-		m.emit("tool", "   "+mark+" "+d.Name)
 		return m.busy.begin("思考中", time.Now()) // 工具完事，等下一轮 LLM
 
 	case "permission_request":
 		// agent 阻塞等裁决，进审批模态
-		var d struct {
-			ID     string          `json:"id"`
-			Tool   string          `json:"tool"`
-			Params json.RawMessage `json:"params"`
-		}
-		jsonUnmarshal(ev.Payload, &d)
-		m.approval = &pendingApproval{id: d.ID, tool: d.Tool, params: string(d.Params)}
+		m.approval = &pendingApproval{id: f.ID, tool: f.Tool, params: string(f.Params)}
 		switch {
-		case who.Root != "" && who.Root != cur:
+		case f.Root != "" && f.Root != cur:
 			m.approval.from = "另一段对话"
-		case who.SessionID != who.Root:
+		case f.SessionID != f.Root:
 			m.approval.from = "子任务"
 		}
 		return m.busy.begin("等待你的审批", time.Now())
 
 	case "interrupted":
-		m.emit("info", "已中断")
+		m.emit(kindInfo, "已中断")
 		m.awaiting = false
 		m.busy.stop()
 		m.approval = nil
 
 	case "turn_end":
 		// turn 结束不是收工（还要过收工判定），读秒只认 agent_end
-		m.closeLine()
-		var d struct {
-			Error string `json:"error"`
-		}
-		jsonUnmarshal(ev.Payload, &d)
-		// core 报的失败落到对话流里
-		if d.Error != "" {
-			m.emit("error", "✗ "+d.Error)
+		m.tr.close()
+		// core 报的失败落到对话里
+		if f.Error != "" {
+			m.emit(kindError, "✗ "+f.Error)
 		}
 
 	case "agent_end":
 		// 唯一的收工信号
-		m.closeLine()
+		m.tr.close()
 		m.awaiting = false
 		m.busy.stop()
-
-	case "message_end":
-		m.closeLine()
 	}
 	return nil
 }
 
 // subEvent 画子 agent 的动静：一行一条，缩进挂在父对话里。正文与思考不铺开——
-// 两段文字交错着长，行流就乱了；它干完了什么，完成通知会以 user 消息回到父对话。
+// 两段文字交错着长，对话就乱了；它干完了什么，完成通知会以 user 消息回到父对话。
 // 读秒行与 awaiting 只归父对话管：子 agent 收工不是这段对话收工。
-func (m *model) subEvent(ev client.Event) {
-	var d struct {
-		Text   string `json:"text"`
-		Name   string `json:"name"`
-		Status int    `json:"status"`
-	}
-	jsonUnmarshal(ev.Payload, &d)
-	switch ev.Type {
+func (m *model) subEvent(f client.Frame) {
+	switch f.Event {
 	case "message_start":
-		task, _, _ := strings.Cut(d.Text, "\n")
-		m.emit("sub", "  ↳ 子任务："+task)
+		task, _, _ := strings.Cut(f.Text, "\n")
+		m.emit(kindInfo, "  ↳ 子任务："+task)
 	case "tool_execution_start":
-		m.emit("sub", "  ↳   🔧 "+d.Name)
+		m.emit(kindInfo, "  ↳   🔧 "+f.Name)
 	case "interrupted":
-		m.emit("sub", "  ↳ 子任务已中断")
+		m.emit(kindInfo, "  ↳ 子任务已中断")
 	case "agent_end":
-		m.emit("sub", "  ↳ 子任务收工")
+		m.emit(kindInfo, "  ↳ 子任务收工")
 	}
-}
-
-// who 是一帧的出处：哪段对话（root）、谁说的（session_id）
-type origin struct {
-	SessionID string `json:"session_id"`
-	Root      string `json:"root"`
-}
-
-func whoOf(payload string) origin {
-	var w origin
-	jsonUnmarshal(payload, &w)
-	return w
 }
 
 // mine 是这帧是否出自当前对话本身（不是子任务，也不是别段对话）
-func (m *model) mine(ev client.Event) bool {
-	w := whoOf(ev.Payload)
-	return w.Root == m.client.SessionID() && w.SessionID == w.Root
-}
-
-// deltaOf 取事件载荷里的 delta 字段（message_update / thinking_update 同构）
-func deltaOf(payload string) string {
-	var d struct {
-		Delta string `json:"delta"`
-	}
-	jsonUnmarshal(payload, &d)
-	return d.Delta
-}
-
-func jsonUnmarshal(s string, v any) {
-	_ = json.Unmarshal([]byte(s), v)
+func (m *model) mine(f client.Frame) bool {
+	return f.Root == m.client.SessionID() && f.SessionID == f.Root
 }
 
 // ==================== 渲染 ====================
 
-// chrome 是屏幕底下那块。历史区高度 = 屏幕减去它（histHeight）。
-func (m model) chrome(width int) []string {
-	// 历史与交互区之间留一行空白
-	rows := []string{""}
-	if m.approval != nil {
-		rows = append(rows, renderApproval(m.approval, width)...)
-	}
-	if m.panel != nil {
-		rows = append(rows, renderPanel(m.panel, width)...)
-	}
-	if matches := m.menuMatches(); len(matches) > 0 {
-		rows = append(rows, renderMenu(matches, m.menuIndex(matches), width)...)
-	}
-	if status := m.busy.render(width); status != "" {
-		rows = append(rows, status)
-	}
-	rows = append(rows, m.ed.view(width)...)
-	if status := m.sl.render(); status != "" {
-		rows = append(rows, status)
-	}
-	return rows
-}
-
-// View 画整个屏幕：历史区 + 底下那块。
-func (m model) View() string {
-	width := m.viewWidth()
-	chrome := m.chrome(width)
-	hist := m.history(width, max(1, m.height-len(chrome)))
-	return strings.Join(hist, "\n") + "\n" + strings.Join(chrome, "\n")
-}
-
-// renderMenu 渲染斜杠命令菜单（输入行上方）：▸ 高亮当前项，条目多时按高亮开窗
+// renderMenu 渲染斜杠命令菜单：/命令名  说明
 func renderMenu(cmds []client.Command, sel, width int) []string {
-	lo, hi := window(len(cmds), sel, menuMaxRows)
-	var out []string
-	for i := lo; i < hi; i++ {
-		text := "/" + cmds[i].Name
-		if cmds[i].Description != "" {
-			text += "  " + cmds[i].Description
-		}
-		text = fit(text, width-2) // 菜单一条一行，宽了就截
-		if i == sel {
-			out = append(out, menuSelStyle.Render("▸ "+text))
-		} else {
-			out = append(out, menuStyle.Render("  "+text))
-		}
+	labels := make([]string, len(cmds))
+	for i, c := range cmds {
+		labels[i] = strings.TrimSpace("/" + c.Name + "  " + c.Description)
 	}
-	return out
+	return renderList(labels, sel, menuMaxRows, width)
 }
 
 // describeCommand 是没有专门渲染器（或载荷解不开）时的通用结果行
@@ -905,21 +713,26 @@ func renderModels(data json.RawMessage) string {
 		return "✅ /model: 端点没报任何模型（手动指定：/model <模型名>）"
 	}
 	var out []string
-	for _, m := range list {
+	for _, mi := range list {
 		mark := "  "
-		if m.Current {
+		if mi.Current {
 			mark = "● "
 		}
-		text := mark + m.Name
-		if m.OwnedBy != "" {
-			text += " [" + m.OwnedBy + "]"
-		}
-		if c := humanContext(m.Context); c != "" {
-			text += "  " + c
-		}
-		out = append(out, text)
+		out = append(out, mark+modelLabel(mi))
 	}
 	return strings.Join(out, "\n")
+}
+
+// modelLabel 是一个模型的一行说明：名称 [供应商] 上下文
+func modelLabel(mi client.ModelInfo) string {
+	text := mi.Name
+	if mi.OwnedBy != "" {
+		text += " [" + mi.OwnedBy + "]"
+	}
+	if c := humanContext(mi.Context); c != "" {
+		text += "  " + c
+	}
+	return text
 }
 
 // humanContext 把上下文窗口折算成人话：1048576 → 1M，131072 → 128k；0（未知）返回空串
@@ -984,8 +797,9 @@ func main() {
 		runSetup(c, s)
 	}
 
-	// alternate screen 才能「换一个 agent 看」（ADR-0020）。不开鼠标模式：会关掉终端的选中复制
-	p := tea.NewProgram(initialModel(c), tea.WithAltScreen())
+	// alternate screen 由 View 声明（view.go）
+	p := tea.NewProgram(initialModel(c))
+	go pump(c, p)
 	if _, err = p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "TUI 运行失败:", err)
 		os.Exit(1)

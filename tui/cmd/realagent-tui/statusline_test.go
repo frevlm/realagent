@@ -15,18 +15,6 @@ func testStatusline() statusline {
 	}
 }
 
-func TestStatuslineDescribeNoArgs(t *testing.T) {
-	sl, msg := testStatusline().applyStatuslineCmd("")
-	if sl != testStatusline() {
-		t.Error("无参数不应改配置")
-	}
-	for _, want := range []string{"model:on", "directory:on", "git:on", "icons:emoji"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("describe() = %q，缺 %q", msg, want)
-		}
-	}
-}
-
 func TestStatuslineToggleSegment(t *testing.T) {
 	sl, msg := testStatusline().applyStatuslineCmd("disable git")
 	if sl.showGit {
@@ -69,16 +57,15 @@ func TestStatuslineRejectsUnknownArgs(t *testing.T) {
 func TestStatuslineEventUpdatesModel(t *testing.T) {
 	m := testModel()
 	m.sl = testStatusline()
-	feedEvents(&m, client.Event{Type: "statusline",
-		Payload: `{"model":"deepseek-v4","owned_by":"deepseek","context":131072}`})
+	feed(&m, client.Frame{Event: "statusline", Model: "deepseek-v4"})
 	if m.sl.model != "deepseek-v4" {
 		t.Errorf("statusline 帧后 model = %q, want deepseek-v4", m.sl.model)
 	}
 	if !strings.Contains(m.sl.render(), "deepseek-v4") {
 		t.Errorf("状态栏应渲染新模型: %q", m.sl.render())
 	}
-	if len(m.lines) != 0 {
-		t.Errorf("statusline 帧不该往对话流里写东西，got %v", roleTexts(m))
+	if len(m.tr.items) != 0 {
+		t.Errorf("statusline 帧不该往对话里写条目，got %v", dump(m))
 	}
 }
 

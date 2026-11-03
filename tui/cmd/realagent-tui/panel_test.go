@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"realagent/tui/internal/client"
 )
@@ -104,15 +104,12 @@ func TestSessionPanel(t *testing.T) {
 }
 
 // 端点一个模型都没报：面板只剩手动输入；坏载荷造不出面板，退回文本输出
-func TestMakePanelEmpty(t *testing.T) {
-	if p := makePanel("model", json.RawMessage(`[]`)); p == nil || len(p.items) != 1 || !p.items[0].edit {
+func TestPanelEmpty(t *testing.T) {
+	if p := modelPanel(json.RawMessage(`[]`)); p == nil || len(p.items) != 1 || !p.items[0].edit {
 		t.Errorf("空清单应只剩手动输入: %+v", p)
 	}
-	if p := makePanel("model", json.RawMessage(`{`)); p != nil {
+	if p := modelPanel(json.RawMessage(`{`)); p != nil {
 		t.Error("坏载荷不该开面板")
-	}
-	if p := makePanel("plugins", nil); p != nil {
-		t.Error("无面板的命令不该开面板")
 	}
 	if p := sessionPanel(nil, ""); p != nil {
 		t.Error("没有对话不该开面板")
@@ -198,7 +195,7 @@ func TestPanelEnterManual(t *testing.T) {
 	}
 }
 
-// 命令结果回来时按 panelWant 开面板，且不再往 scrollback 打那坨清单
+// 命令结果回来时按 panelWant 开面板，清单不再写进对话
 func TestReplyOpensPanel(t *testing.T) {
 	m := testModel()
 	m.awaiting = true
@@ -207,8 +204,8 @@ func TestReplyOpensPanel(t *testing.T) {
 	if m.panel == nil {
 		t.Fatal("结果未开面板")
 	}
-	if len(lineTexts(m)) != 0 {
-		t.Errorf("开了面板还打文本清单: %v", lineTexts(m))
+	if len(texts(m)) != 0 {
+		t.Errorf("开了面板还打文本清单: %v", texts(m))
 	}
 	if m.awaiting || m.busy.active {
 		t.Error("命令结果到手就该收工")
@@ -223,7 +220,7 @@ func TestReplyWithoutPanelWant(t *testing.T) {
 	if m.panel != nil {
 		t.Error("没要面板就别弹")
 	}
-	if len(lineTexts(m)) == 0 {
+	if len(texts(m)) == 0 {
 		t.Error("应渲染模型清单文本")
 	}
 }
@@ -255,10 +252,10 @@ func TestPanelIsModal(t *testing.T) {
 	m := testModel()
 	m.panel = modelPanel(modelsJSON())
 	m, _ = m.handleKey(keyRunes("x"))
-	if !m.ed.empty() {
+	if m.ed.value() != "" {
 		t.Errorf("面板开着时按键不该写进输入框: %q", m.ed.value())
 	}
-	if _, cmd := m.handleKey(key(tea.KeyCtrlC)); cmd == nil {
+	if _, cmd := m.handleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); cmd == nil {
 		t.Error("ctrl+c 仍应能退出")
 	}
 }

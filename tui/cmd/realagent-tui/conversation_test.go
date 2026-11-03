@@ -8,23 +8,24 @@ import (
 	"realagent/tui/internal/client"
 )
 
-func frame(typ, root, sid, rest string) client.Event {
-	return client.Event{Type: typ, Payload: `{"root":"` + root + `","session_id":"` + sid + `",` + rest + `}`}
+func at(root, sid string, f client.Frame) client.Frame {
+	f.Root, f.SessionID = root, sid
+	return f
 }
 
 // 当前对话的画，别的对话的不画；子 agent 只留动静一行一条，正文不铺开
 func TestFrameRouting(t *testing.T) {
 	m := testModel()
 	m.client.Use("s-1")
-	m.handleEvent(frame("message_start", "s-1", "s-1", `"text":"主线"`))
-	m.handleEvent(frame("message_start", "s-2", "s-2", `"text":"隔壁"`))
-	m.handleEvent(frame("message_start", "s-1", "s-sub", `"text":"去查日志\n细节"`))
-	m.handleEvent(frame("message_update", "s-1", "s-sub", `"delta":"子 agent 的正文"`))
-	m.handleEvent(frame("tool_execution_start", "s-1", "s-sub", `"name":"bash","id":"c1"`))
-	m.handleEvent(frame("agent_end", "s-1", "s-sub", `"cost":0`))
+	m.handleEvent(at("s-1", "s-1", client.Frame{Event: "message_start", Text: "主线"}))
+	m.handleEvent(at("s-2", "s-2", client.Frame{Event: "message_start", Text: "隔壁"}))
+	m.handleEvent(at("s-1", "s-sub", client.Frame{Event: "message_start", Text: "去查日志\n细节"}))
+	m.handleEvent(at("s-1", "s-sub", client.Frame{Event: "message_update", Delta: "子 agent 的正文"}))
+	m.handleEvent(at("s-1", "s-sub", client.Frame{Event: "tool_execution_start", Name: "bash", ID: "c1"}))
+	m.handleEvent(at("s-1", "s-sub", client.Frame{Event: "agent_end"}))
 	want := []string{"主线", "  ↳ 子任务：去查日志", "  ↳   🔧 bash", "  ↳ 子任务收工"}
-	if got := lineTexts(m); !reflect.DeepEqual(got, want) {
-		t.Errorf("行流 = %q, want %q", got, want)
+	if got := texts(m); !reflect.DeepEqual(got, want) {
+		t.Errorf("条目 = %q, want %q", got, want)
 	}
 }
 
@@ -33,7 +34,7 @@ func TestSubAgentEndKeepsBusy(t *testing.T) {
 	m := testModel()
 	m.client.Use("s-1")
 	m.awaiting = true
-	m.handleEvent(frame("agent_end", "s-1", "s-sub", `"cost":0`))
+	m.handleEvent(at("s-1", "s-sub", client.Frame{Event: "agent_end"}))
 	if !m.awaiting {
 		t.Error("子 agent 收工替整段对话收了工")
 	}
@@ -48,7 +49,7 @@ func TestApprovalFrom(t *testing.T) {
 		{"s-1", "s-sub", "子任务"},
 		{"s-1", "s-1", ""},
 	} {
-		m.handleEvent(frame("permission_request", c.root, c.sid, `"id":"a","tool":"bash"`))
+		m.handleEvent(at(c.root, c.sid, client.Frame{Event: "permission_request", ID: "a", Tool: "bash"}))
 		if m.approval == nil || m.approval.from != c.want {
 			t.Errorf("%s/%s: approval = %+v, want from %q", c.root, c.sid, m.approval, c.want)
 		}

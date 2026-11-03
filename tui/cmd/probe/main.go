@@ -18,7 +18,7 @@ func main() {
 	a := client.New("127.0.0.1:12345", wd)
 	b := client.New("127.0.0.1:12345", wd)
 
-	ch := make(chan client.Event, 256)
+	ch := make(chan client.Frame, 256)
 	go a.SubscribeEvents(ch)
 	time.Sleep(300 * time.Millisecond)
 

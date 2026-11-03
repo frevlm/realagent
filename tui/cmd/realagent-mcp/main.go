@@ -125,15 +125,11 @@ func (b *bridge) report(id string) item {
 func finalText(frames []client.Frame) string {
 	text := ""
 	for _, f := range frames {
-		var d struct {
-			Delta string `json:"delta"`
-		}
-		switch f.Type {
+		switch f.Event {
 		case "turn_start":
 			text = ""
 		case "message_update":
-			_ = json.Unmarshal(f.Data, &d)
-			text += d.Delta
+			text += f.Delta
 		}
 	}
 	return text
@@ -143,28 +139,21 @@ func (b *bridge) cancel(_ context.Context, _ *mcp.CallToolRequest, in cancelIn) 
 	return nil, struct{}{}, b.base.With("", in.SessionID).Interrupt()
 }
 
-func (b *bridge) handle(ev client.Event) {
-	var d struct {
-		Root      string `json:"root"`
-		SessionID string `json:"session_id"`
-		ID        string `json:"id"`
-		Error     string `json:"error"`
-	}
-	_ = json.Unmarshal([]byte(ev.Payload), &d)
+func (b *bridge) handle(f client.Frame) {
 	b.mu.Lock()
-	_, ours := b.dir[d.Root]
+	_, ours := b.dir[f.Root]
 	switch {
-	case ev.Type == "permission_request": // 先全放行；以后改成转给调用方问
-		go b.base.RespondApproval(d.ID, true)
-	case ev.Type == "turn_end" && d.Error != "" && d.SessionID == d.Root:
-		b.errs[d.Root] = d.Error
-	case ev.Type == "agent_end":
+	case f.Event == "permission_request": // 先全放行；以后改成转给调用方问
+		go b.base.RespondApproval(f.ID, true)
+	case f.Event == "turn_end" && f.Error != "" && f.SessionID == f.Root:
+		b.errs[f.Root] = f.Error
+	case f.Event == "agent_end":
 		close(b.tick)
 		b.tick = make(chan struct{})
 	}
 	b.mu.Unlock()
-	if ev.Type == "agent_end" && ours {
-		if it := b.report(d.Root); it.State == "done" {
+	if f.Event == "agent_end" && ours {
+		if it := b.report(f.Root); it.State == "done" {
 			b.push(it)
 		}
 	}
@@ -199,10 +188,10 @@ func (t tap) Connect(ctx context.Context) (mcp.Connection, error) {
 // pump 把推送流喂给 handle；断了 1 秒后用同一个 clientID 重连
 func (b *bridge) pump(ctx context.Context) {
 	for ctx.Err() == nil {
-		ch := make(chan client.Event, 64)
+		ch := make(chan client.Frame, 64)
 		go b.base.SubscribeEvents(ch)
-		for ev := range ch {
-			b.handle(ev)
+		for f := range ch {
+			b.handle(f)
 		}
 		time.Sleep(time.Second)
 	}

@@ -6,10 +6,9 @@
 package main
 
 import (
-	"encoding/json"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"realagent/tui/internal/client"
 )
 
@@ -22,7 +21,7 @@ type paceMsg time.Time
 
 // queued 是排队中的一帧。runes 非空 = 匀速吐的增量（还没吐的那截），空 = 到队头就放
 type queued struct {
-	ev    client.Event
+	f     client.Frame
 	runes []rune
 }
 
@@ -40,14 +39,14 @@ func paceTick() tea.Cmd {
 }
 
 // enqueue 收下一帧。只有画进当前对话正文的增量才匀速吐，别的不占节拍
-func (m *model) enqueue(ev client.Event, now time.Time) tea.Cmd {
-	item := queued{ev: ev}
-	if (ev.Type == "message_update" || ev.Type == "thinking_update") && m.mine(ev) {
-		item.runes = []rune(deltaOf(ev.Payload))
+func (m *model) enqueue(f client.Frame, now time.Time) tea.Cmd {
+	q := queued{f: f}
+	if (f.Event == "message_update" || f.Event == "thinking_update") && m.mine(f) {
+		q.runes = []rune(f.Delta)
 	}
 	p := &m.pace
-	p.q = append(p.q, item)
-	p.backlog += len(item.runes)
+	p.q = append(p.q, q)
+	p.backlog += len(q.runes)
 	p.rate = float64(p.backlog) / paceLag.Seconds()
 	if p.ticking {
 		return nil
@@ -67,16 +66,16 @@ func (m *model) play(budget float64) tea.Cmd {
 		if len(head.runes) > 0 && n == 0 {
 			break
 		}
-		ev := head.ev
+		f := head.f
 		if n > 0 {
-			ev.Payload = withDelta(ev.Payload, string(head.runes[:n]))
+			f.Delta = string(head.runes[:n])
 		}
 		if head.runes = head.runes[n:]; len(head.runes) == 0 {
 			p.q = p.q[1:]
 		}
 		p.budget -= float64(n)
 		p.backlog -= n
-		cmds = append(cmds, m.handleEvent(ev))
+		cmds = append(cmds, m.handleEvent(f))
 	}
 	if len(p.q) == 0 {
 		p.budget = 0 // 断货期间不攒额度，下一团来了从零起步
@@ -99,13 +98,4 @@ func (m *model) onPace(t time.Time) tea.Cmd {
 // flush 把队里的全放出来（Esc 中断时：收到多少就立刻看到多少）
 func (m *model) flush() tea.Cmd {
 	return m.play(float64(m.pace.backlog))
-}
-
-// withDelta 换掉载荷里的 delta，其余字段（root / session_id）原样留着给 handleEvent 筛
-func withDelta(payload, delta string) string {
-	var o map[string]json.RawMessage
-	jsonUnmarshal(payload, &o)
-	o["delta"], _ = json.Marshal(delta)
-	b, _ := json.Marshal(o)
-	return string(b)
 }

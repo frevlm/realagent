@@ -4,18 +4,17 @@
 // altscreen 之后屏幕每帧全量重绘（ADR-0020），所以断言的是**最后一帧**：
 // 输出流里前面那些是被覆盖掉的中间帧，拿整个流去数出现次数只会数到重绘次数。
 //
-// 单元测试只能证明行流对；这一层证明历史区通路对。
+// 单元测试只能证明条目对；这一层证明历史区通路对。
 package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"realagent/tui/internal/client"
@@ -46,15 +45,15 @@ func (h headless) Init() tea.Cmd { return nil }
 
 func (h headless) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return h.model.Update(msg) }
 
-func (h headless) View() string { return h.model.View() }
+func (h headless) View() tea.View { return h.model.View() }
 
 func TestAltscreenPaintsWholeTurn(t *testing.T) {
 	var out safeBuf
 	p := tea.NewProgram(headless{testModel()},
+		tea.WithWindowSize(40, 24),
 		tea.WithInput(nil),
 		tea.WithOutput(&out),
 		tea.WithoutSignalHandler(),
-		tea.WithAltScreen(),
 	)
 
 	done := make(chan struct{})
@@ -63,25 +62,23 @@ func TestAltscreenPaintsWholeTurn(t *testing.T) {
 		p.Run()
 	}()
 
-	p.Send(tea.WindowSizeMsg{Width: 40, Height: 24})
 	// 一个完整回合：用户提问 → 流式回答（多段）→ 工具 → 收工。
-	// 用户那一行也从 core 来（message_start 带正文），本地不回显
-	p.Send(eventMsg(client.Event{Type: "message_start", Payload: `{"role":"user","text":"问一句"}`}))
-	p.Send(eventMsg(client.Event{Type: "turn_start", Payload: `{}`}))
+	// 用户那条也从 core 来（message_start 带正文），本地不回显
+	p.Send(eventMsg(client.Frame{Event: "message_start", Text: "问一句"}))
+	p.Send(eventMsg(client.Frame{Event: "turn_start"}))
 	for _, delta := range []string{"第一段回答。\n", "第二段回答，", "它比较长需要折行折行折行。\n"} {
-		payload, _ := json.Marshal(map[string]string{"delta": delta})
-		p.Send(eventMsg(client.Event{Type: "message_update", Payload: string(payload)}))
+		p.Send(eventMsg(client.Frame{Event: "message_update", Delta: delta}))
 	}
-	p.Send(eventMsg(client.Event{Type: "tool_execution_start", Payload: `{"name":"bash"}`}))
-	p.Send(eventMsg(client.Event{Type: "tool_execution_end", Payload: `{"name":"bash","status":0}`}))
-	p.Send(eventMsg(client.Event{Type: "turn_end", Payload: `{"tool_uses":0}`}))
+	p.Send(eventMsg(client.Frame{Event: "tool_execution_start", Name: "bash"}))
+	p.Send(eventMsg(client.Frame{Event: "tool_execution_end", Name: "bash", Status: 0}))
+	p.Send(eventMsg(client.Frame{Event: "turn_end"}))
 
 	time.Sleep(200 * time.Millisecond) // 让渲染器把帧刷出去
 	p.Quit()
 	<-done
 
 	got := ansi.Strip(out.String())
-	for _, want := range []string{"问一句", "第一段回答。", "第二段回答", "🔧 bash", "✓ bash"} {
+	for _, want := range []string{"问一句", "第一段回答。", "第二段回答", "✓ bash"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("屏幕应含 %q\n实际输出:\n%s", want, got)
 		}
@@ -92,11 +89,11 @@ func TestAltscreenPaintsWholeTurn(t *testing.T) {
 func TestAltscreenNoDuplicateLines(t *testing.T) {
 	m := testModel()
 	m.width, m.height = 40, 24
-	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"问一句"}`})
-	m.handleEvent(client.Event{Type: "message_update", Payload: `{"delta":"答一句"}`})
-	m.closeLine()
+	m.handleEvent(client.Frame{Event: "message_start", Text: "问一句"})
+	m.handleEvent(client.Frame{Event: "message_update", Delta: "答一句"})
+	m.tr.close()
 
-	screen := ansi.Strip(m.View())
+	screen := ansi.Strip(m.View().Content)
 	for _, want := range []string{"问一句", "答一句"} {
 		if n := strings.Count(screen, want); n != 1 {
 			t.Errorf("%q 应只出现 1 次，got %d\n屏幕:\n%s", want, n, screen)

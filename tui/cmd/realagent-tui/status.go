@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // 状态行刷新周期（spinner 转动帧率；读秒精度 1s 足够，120ms 只为动画顺滑）
@@ -25,24 +26,9 @@ type activity struct {
 	now    time.Time // 最近一次 tick 时间（elapsed = now - start）
 	seq    int       // tick 代号：只有 seq 相同的 tick 续命，杜绝并发计时循环
 	frame  int       // spinner 帧序号
-	cost   cost      // 本次 run 的累计花费（core 的 status_update 帧，绝对值覆盖写）
-}
-
-// cost 是 status_update 帧的载荷（PROTOCOL.md：本次 run 累计、绝对值）。
-// 钱由 core 按模型数据表算好报上来，TUI 不碰单价（ADR-0009）。
-// 零 = 没数据（表里没这个模型或端点不报用量），渲染时整段隐藏，绝不显示 $0。
-type cost struct {
-	USD float64 `json:"cost"`
-}
-
-func (c cost) empty() bool { return c.USD == 0 }
-
-// text 渲染为 "$0.0123"：四位小数，够看清一次对话花了多少
-func (c cost) text() string {
-	if c.empty() {
-		return ""
-	}
-	return fmt.Sprintf("$%.4f", c.USD)
+	// 本次 run 的累计花费（status_update 帧，PROTOCOL.md：绝对值，覆盖写）。钱由 core 按模型数据表
+	// 算好报上来，TUI 不碰单价（ADR-0009）。零 = 没数据（表里没这个模型或端点不报用量），整段不画，绝不显示 $0
+	cost float64
 }
 
 // tickMsg 是状态行的定时刷新（seq 标识所属计时循环）
@@ -67,7 +53,7 @@ func (a *activity) begin(verb string, now time.Time) tea.Cmd {
 	a.start = now
 	a.now = now
 	a.frame = 0
-	a.cost = cost{} // 新一次 run，花费跟读秒同一个重置点
+	a.cost = 0 // 新一次 run，花费跟读秒同一个重置点
 	a.seq++
 	return tickCmd(a.seq)
 }
@@ -113,19 +99,20 @@ func (a activity) render(width int) string {
 	head := spin + " " + a.verb + "…"
 	elapsed := elapsedText(a.elapsed())
 
+	usd := fmt.Sprintf("$%.4f", a.cost) // 四位小数，够看清一次对话花了多少
 	tails := []string{
-		fmt.Sprintf(" (%s · %s · esc 中断)", elapsed, a.cost.text()),
-		fmt.Sprintf(" (%s · %s)", elapsed, a.cost.text()),
+		fmt.Sprintf(" (%s · %s · esc 中断)", elapsed, usd),
+		fmt.Sprintf(" (%s · %s)", elapsed, usd),
 		fmt.Sprintf(" (%s · esc 中断)", elapsed),
 		fmt.Sprintf(" (%s)", elapsed),
 		"",
 	}
-	if a.cost.empty() {
+	if a.cost == 0 {
 		tails = tails[2:]
 	}
 	tail := tails[len(tails)-1]
 	for _, t := range tails {
-		if width <= 0 || len([]rune(head+t)) <= width {
+		if width <= 0 || ansi.StringWidth(head+t) <= width {
 			tail = t
 			break
 		}

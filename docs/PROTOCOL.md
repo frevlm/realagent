@@ -101,7 +101,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 - **变了才推**：core 每处理完一条请求比对一次当前载荷，不同才发一帧，相同不发（配置只在请求里改）。
 - **谁改的不重要**：载荷本身就是信号。改配置的代码路径不需要通知任何人，客户端也不需要知道是谁改的。
 - **不做配置文件热重载**（ADR-0010）：core 启动时读一次 `settings.json`，之后不再看它。用户手改配置需重启 core 才生效，改模型的唯一在线途径是 `/model <name>`。
-- **当前客户端只消费 `model`**：TUI 的 `client.Statusline` 三个键都解析（tui/internal/client/client.go:203-206），但传给渲染的 `statusMsg` 只带 `model`（tui/cmd/realagent-tui/statusline.go:89-91）；状态栏另两段 dir 与 git 是 TUI 本地算的，不来自本帧。`owned_by` / `context` 因此目前无人渲染。协议保留这两个键——载荷形状是 core 侧的事实，客户端渲染多少是客户端的事。
+- **当前客户端只消费 `model`**：TUI 的 `client.Statusline` 三个键都解析（tui/internal/client/client.go 的 `Statusline`），但传给渲染的 `statusMsg` 只带 `model`（tui/cmd/realagent-tui/statusline.go 的 `statusMsg`），推送帧也只取 `model`；状态栏另两段 dir 与 git 是 TUI 本地算的，不来自本帧。`owned_by` / `context` 因此目前无人渲染。协议保留这两个键——载荷形状是 core 侧的事实，客户端渲染多少是客户端的事。
 
 ### tool_output 帧
 
@@ -111,7 +111,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 
 - **不与 tool_result 二选一**：完整输出照旧随工具结果回到模型那边，这里推的只是"现在长什么样"，给的是人看的实时反馈。
 - `call_id` 是认领凭据——就是 `tool_execution_start` 那个 `id`，客户端靠它把碎片挂到对应那次调用下面。
-- **按行推，但不保证一帧一行**：超长行会被切成几帧，最后一段可能没有换行符。客户端要按"续写开着的行"处理（TUI 走 `stream`，见 tui/cmd/realagent-tui/main.go 的 `tool_output` 分支），不能假设一帧即一行。
+- **按行推，但不保证一帧一行**：超长行会被切成几帧，最后一段可能没有换行符。客户端要按"续写"处理，不能假设一帧即一行（TUI 按 `call_id` 找到那次调用，把碎片接在它的输出后面，见 tui/cmd/realagent-tui/main.go 的 `tool_output` 分支，ADR-0033）。
 - **一条流，不分家**：`stream` 恒为 `output`——bash 的 stdout 与 stderr 接在同一个管道上（ADR-0017）。报错原文是模型判断该不该重试的唯一依据，只推 stdout 等于把它扔了；合流而不是两个管道，是因为交错顺序就是人在终端里看见的顺序，而"哪一行来自哪条流"没有第二个读者。
 - **谁推谁负责**：帧由工具自己发出（bash 的读循环：`core/src/tools/tools.cpp`），不具备实时输出的工具就不发这个帧。
 - 输出超上限后**只吞不推**（core-tools 为 `MAX_OUT`）：管道仍要读干净，中途撒手等于给命令一个 SIGPIPE。

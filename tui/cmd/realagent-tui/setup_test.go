@@ -5,19 +5,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"realagent/tui/internal/client"
 )
 
 var (
-	kEnter = tea.KeyMsg{Type: tea.KeyEnter}
-	kDown  = tea.KeyMsg{Type: tea.KeyDown}
+	kEnter = key(tea.KeyEnter)
+	kDown  = key(tea.KeyDown)
 )
 
-func kType(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
-
 // press 依次喂按键；拉清单的命令不跑，由测试喂 modelsFetched
-func press(m setupModel, keys ...tea.KeyMsg) setupModel {
+func press(m setupModel, keys ...tea.KeyPressMsg) setupModel {
 	for _, k := range keys {
 		m, _ = m.key(k)
 	}
@@ -31,14 +29,14 @@ func fetched(m setupModel, list []string, err error) setupModel {
 
 func TestSetupStepsInOrder(t *testing.T) {
 	m := newSetupModel(nil, client.Setup{})
-	m = press(m, kDown, kDown, kEnter, kType("http://x/v1"), kEnter, kType("sk-1"), kEnter)
+	m = press(m, kDown, kDown, kEnter, keyRunes("http://x/v1"), kEnter, keyRunes("sk-1"), kEnter)
 	if m.step != stepModel || !m.loading {
 		t.Fatalf("api_key 之后应进模型页拉清单，step=%d loading=%v", m.step, m.loading)
 	}
 	m = fetched(m, []string{"a", "b"}, nil)
-	m = press(m, kDown, kEnter)                              // model：选 b
-	m = press(m, kDown, kDown, kEnter, kType("own"), kEnter) // small_model：手动输入
-	m = press(m, kEnter)                                     // decision_model：选 a
+	m = press(m, kDown, kEnter)                                 // model：选 b
+	m = press(m, kDown, kDown, kEnter, keyRunes("own"), kEnter) // small_model：手动输入
+	m = press(m, kEnter)                                        // decision_model：选 a
 	want := client.Setup{Protocol: "openai-chat", BaseURL: "http://x/v1", APIKey: "sk-1", Model: "b", SmallModel: "own", DecisionModel: "a"}
 	if got := m.values(); got != want {
 		t.Fatalf("走完 = %+v，想要 %+v", got, want)
@@ -52,7 +50,7 @@ func TestSetupRevlmSkipsBaseURL(t *testing.T) {
 	if m.step != stepAPIKey {
 		t.Fatalf("选 revlm 后应到 api_key 页，step=%d", m.step)
 	}
-	if m, _ = m.key(tea.KeyMsg{Type: tea.KeyEsc}); m.step != stepProtocol {
+	if m, _ = m.key(key(tea.KeyEscape)); m.step != stepProtocol {
 		t.Fatalf("Esc 应回协议页，step=%d", m.step)
 	}
 }
@@ -60,12 +58,12 @@ func TestSetupRevlmSkipsBaseURL(t *testing.T) {
 func TestSetupPrefillAndFetchFail(t *testing.T) {
 	m := newSetupModel(nil, client.Setup{Protocol: "openai-chat", BaseURL: "http://x/v1", APIKey: "sk-old", Model: "m"})
 	m = press(m, kEnter, kEnter)
-	if v := m.View(); !strings.Contains(v, "sk-old") {
+	if v := m.View().Content; !strings.Contains(v, "sk-old") {
 		t.Fatalf("已配的 api_key 应预填：\n%s", v)
 	}
 	m = press(m, kEnter)
 	m = fetched(m, nil, errors.New("端点返回 HTTP 404"))
-	if !m.manual || !strings.Contains(m.View(), "HTTP 404") || m.eds[stepModel].value() != "m" {
-		t.Fatalf("拉不到清单应手填现值并说明原因：\n%s", m.View())
+	if !m.manual || !strings.Contains(m.View().Content, "HTTP 404") || m.eds[stepModel].value() != "m" {
+		t.Fatalf("拉不到清单应手填现值并说明原因：\n%s", m.View().Content)
 	}
 }

@@ -1,4 +1,4 @@
-// 输入行编辑器：rune 光标 + 常用行编辑键 + 多行输入。
+// 输入框编辑器：rune 光标 + 常用行编辑键 + 多行输入。
 //
 // 一个 []rune 加一个下标，所有编辑都是切片拼接。按 rune 而不是 byte，中文不会被劈开。
 package main
@@ -6,6 +6,8 @@ package main
 import (
 	"strings"
 	"unicode"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // editor 是输入框的全部状态：文本 + 光标位置（runes 下标，取值 0..len）
@@ -16,8 +18,6 @@ type editor struct {
 
 func (e *editor) value() string { return string(e.runes) }
 
-func (e *editor) empty() bool { return len(e.runes) == 0 }
-
 // set 覆盖全文，光标置于末尾（斜杠命令补全走这条）
 func (e *editor) set(s string) {
 	e.runes = []rune(s)
@@ -26,9 +26,15 @@ func (e *editor) set(s string) {
 
 func (e *editor) clear() { e.set("") }
 
-// insert 在光标处插入文本（粘贴的 \r 归一为 \n）
+// insert 在光标处插入文本。换行归一成 \n；其余控制字符（粘贴带进来的 ESC、BEL……）不是输入，丢掉
 func (e *editor) insert(s string) {
-	r := []rune(strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n"))
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
+	r := []rune(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, s))
 	e.runes = append(e.runes[:e.pos], append(r, e.runes[e.pos:]...)...)
 	e.pos += len(r)
 }
@@ -88,22 +94,35 @@ func (e *editor) killWord() {
 	e.pos = i
 }
 
-// display 返回带光标的显示文本：光标处字符反显，行尾则反显一个空格。
-// 光标落在换行符上时反显空格再补换行——否则反显块会吞掉换行。
-func (e *editor) display() string {
-	if e.pos >= len(e.runes) {
-		return string(e.runes) + cursorStyle.Render(" ")
-	}
-	head, cur, tail := string(e.runes[:e.pos]), e.runes[e.pos], string(e.runes[e.pos+1:])
-	if cur == '\n' {
-		return head + cursorStyle.Render(" ") + "\n" + tail
-	}
-	return head + cursorStyle.Render(string(cur)) + tail
-}
+// 输入框首行的提示符；续行缩进同宽，与首行正文对齐
+const prompt = "> "
 
-// view 渲染输入框：首行 "> " 提示符着色，续行挂起缩进对齐
-func (e *editor) view(width int) []string {
-	rows := wrapText("> ", e.display(), width)
-	rows[0] = userStyle.Render("> ") + strings.TrimPrefix(rows[0], "> ")
-	return rows
+// view 把输入框排进 width 列、最多 maxRows 行，连同光标在框内的位置（列, 行）。
+// 按字符折行而不是按词：光标落在哪一格是一路数出来的，不用去猜折行器在哪断。
+// \t 画成空格：终端按制表位跳格，宽度没法照字面算。行数超过 maxRows 时开一个窗，光标所在行总在窗内。
+func (e *editor) view(width, maxRows int) (rows []string, cx, cy int) {
+	avail, indent := max(width-len(prompt), 1), strings.Repeat(" ", len(prompt))
+	row, col := userStyle.Render(prompt), 0
+	for i := 0; i <= len(e.runes); i++ { // i == len(runes) 是末尾那格
+		eol := i == len(e.runes) || e.runes[i] == '\n'
+		s := ""
+		if !eol {
+			s = strings.ReplaceAll(string(e.runes[i]), "\t", "    ")
+		}
+		w, need := ansi.StringWidth(s), ansi.StringWidth(s)
+		if i == e.pos {
+			need = max(w, 1) // 光标停在哪，哪里就得占得住一格
+		}
+		if col > 0 && col+need > avail {
+			rows, row, col = append(rows, row), indent, 0
+		}
+		if i == e.pos {
+			cx, cy = col+len(prompt), len(rows)
+		}
+		if row, col = row+s, col+w; eol {
+			rows, row, col = append(rows, row), indent, 0
+		}
+	}
+	lo := max(0, cy-maxRows+1)
+	return rows[lo:min(len(rows), lo+maxRows)], cx, cy - lo
 }

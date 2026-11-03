@@ -6,11 +6,12 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"realagent/tui/internal/client"
 )
 
@@ -45,6 +46,7 @@ type setupModel struct {
 	manual  bool   // 模型页在手填
 	sel     int    // 列表页高亮
 	note    string // 拉清单失败 / 保存失败的原话
+	width   int    // 屏宽；还没到就按 80 排
 }
 
 type setupSaved struct{ err error }
@@ -102,13 +104,21 @@ func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Quit
-	case tea.KeyMsg:
+	case tea.WindowSizeMsg:
+		m.width = v.Width
+		return m, nil
+	case tea.PasteMsg:
+		if m.choices() == nil && !m.loading {
+			m.eds[m.step].insert(strings.TrimSpace(v.Content)) // 粘贴进来的换行不要
+		}
+		return m, nil
+	case tea.KeyPressMsg:
 		return m.key(v)
 	}
 	return m, nil
 }
 
-func (m setupModel) key(v tea.KeyMsg) (setupModel, tea.Cmd) {
+func (m setupModel) key(v tea.KeyPressMsg) (setupModel, tea.Cmd) {
 	switch v.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -139,8 +149,8 @@ func (m setupModel) key(v tea.KeyMsg) (setupModel, tea.Cmd) {
 		ed.backspace()
 	case v.String() == "ctrl+u":
 		ed.clear()
-	case v.Type == tea.KeyRunes:
-		ed.insert(strings.TrimSpace(string(v.Runes))) // 粘贴进来的换行不要
+	default:
+		ed.insert(strings.TrimSpace(v.Text)) // 这几项的值里没有空白
 	}
 	return m, nil
 }
@@ -182,34 +192,35 @@ func (m setupModel) neighbor(d int) int {
 	return s
 }
 
-func (m setupModel) View() string {
-	st := setupSteps[m.step]
+func (m setupModel) View() tea.View {
+	st, width := setupSteps[m.step], cmp.Or(m.width, 80)
 	rows := []string{panelTitleStyle.Render(fmt.Sprintf("(%d/%d) %s", m.step+1, len(setupSteps), st.name))}
+	var cur *tea.Cursor
 	switch items := m.choices(); {
 	case m.loading:
 		rows = append(rows, dimStyle.Render("  正在拉模型清单…"))
 	case items != nil:
-		lo, hi := window(len(items), m.sel, panelMaxRows)
-		for i := lo; i < hi; i++ {
-			if i == m.sel {
-				rows = append(rows, menuSelStyle.Render("▸ "+items[i]))
-			} else {
-				rows = append(rows, menuStyle.Render("  "+items[i]))
-			}
-		}
+		rows = append(rows, renderList(items, m.sel, panelMaxRows, width)...)
 	default:
-		rows = append(rows, userStyle.Render("> ")+m.eds[m.step].display())
+		ed, cx, cy := m.eds[m.step].view(width, 3)
+		cur = tea.NewCursor(cx, len(rows)+cy)
+		rows = append(rows, ed...)
 	}
 	rows = append(rows, dimStyle.Render("  "+st.hint))
 	if m.note != "" {
 		rows = append(rows, errorStyle.Render("  ✗ "+m.note))
 	}
-	return strings.Join(append(rows, dimStyle.Render("  ↑/↓ 选择 · Enter 确认 · Esc 返回")), "\n") + "\n"
+	rows = append(rows, dimStyle.Render("  ↑/↓ 选择 · Enter 确认 · Esc 返回"))
+
+	v := tea.NewView(strings.Join(rows, "\n"))
+	v.AltScreen = true
+	v.Cursor = cur
+	return v
 }
 
 // runSetup 与主界面一样走 alternate screen
 func runSetup(c *client.Client, s client.Setup) {
-	if _, err := tea.NewProgram(newSetupModel(c, s), tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(newSetupModel(c, s)).Run(); err != nil {
 		fmt.Println("引导运行失败:", err)
 	}
 }

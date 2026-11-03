@@ -31,15 +31,7 @@ type panel struct {
 	sel   int
 }
 
-// makePanel 按命令名与结果载荷造面板；造不出返回 nil，调用方退回文本输出。
-func makePanel(command string, data json.RawMessage) *panel {
-	if command == "model" {
-		return modelPanel(data)
-	}
-	return nil
-}
-
-// modelPanel 把 /model 的模型清单做成选择面板：Enter = 切主模型
+// modelPanel 把 /model 的模型清单做成选择面板：Enter = 切主模型。载荷解不开返回 nil，调用方退回文本
 func modelPanel(data json.RawMessage) *panel {
 	var list []client.ModelInfo
 	if err := json.Unmarshal(data, &list); err != nil {
@@ -47,14 +39,7 @@ func modelPanel(data json.RawMessage) *panel {
 	}
 	p := &panel{title: "选择主模型"}
 	for _, mi := range list {
-		text := mi.Name
-		if mi.OwnedBy != "" {
-			text += " [" + mi.OwnedBy + "]"
-		}
-		if c := humanContext(mi.Context); c != "" {
-			text += "  " + c
-		}
-		p.items = append(p.items, panelItem{label: text, mark: mi.Current, submit: "/model " + mi.Name})
+		p.items = append(p.items, panelItem{label: modelLabel(mi), mark: mi.Current, submit: "/model " + mi.Name})
 	}
 	p.items = append(p.items, panelItem{label: manualItem, submit: "/model ", edit: true})
 	p.sel = p.markIndex()
@@ -148,21 +133,29 @@ func wrapIndex(i, n int) int {
 	return ((i % n) + n) % n
 }
 
-// renderPanel 渲染子面板（输入行上方）：标题 + 可选项 + 键位提示
+// renderPanel 渲染子面板：标题 + 可选项（● 是当前生效项）+ 键位提示
 func renderPanel(p *panel, width int) []string {
-	out := []string{panelTitleStyle.Render(fit(p.title, width))}
-	lo, hi := window(len(p.items), p.sel, panelMaxRows)
-	for i := lo; i < hi; i++ {
-		mark := "  "
-		if p.items[i].mark {
-			mark = "● "
-		}
-		text := fit(mark+p.items[i].label, width-2)
-		if i == p.sel {
-			out = append(out, menuSelStyle.Render("▸ "+text))
-		} else {
-			out = append(out, menuStyle.Render("  "+text))
+	labels := make([]string, len(p.items))
+	for i, it := range p.items {
+		labels[i] = "  " + it.label
+		if it.mark {
+			labels[i] = "● " + it.label
 		}
 	}
+	out := append([]string{panelTitleStyle.Render(fit(p.title, width))}, renderList(labels, p.sel, panelMaxRows, width)...)
 	return append(out, dimStyle.Render("  ↑/↓ 选择 · Enter 确认 · Esc 取消"))
+}
+
+// renderList 画一列可选项：▸ 高亮当前项，条目多时按高亮开窗；一条一行，宽了就截
+func renderList(labels []string, sel, rows, width int) []string {
+	lo, hi := window(len(labels), sel, rows)
+	var out []string
+	for i := lo; i < hi; i++ {
+		st, mark := menuStyle, "  "
+		if i == sel {
+			st, mark = menuSelStyle, "▸ "
+		}
+		out = append(out, st.Render(mark+fit(labels[i], width-2)))
+	}
+	return out
 }

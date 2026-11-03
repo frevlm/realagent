@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"realagent/tui/internal/client"
 )
 
@@ -21,12 +21,10 @@ import (
 const statuslineSep = " | "
 
 var (
-	slModelIconStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
-	slModelTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
-	slDirIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
-	slDirTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
-	slGitIconStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	slGitTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	slModelStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+	slDirIconStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+	slDirStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+	slGitStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
 )
 
 // statuslineIcons 一套图标（emoji 或 nerd font）
@@ -85,18 +83,11 @@ func gitBranch() string {
 	return branch
 }
 
-// statusMsg 携带 GET /statusline 的拉取结果
-type statusMsg struct {
-	model string
-}
-
+// fetchStatusCmd 拿状态栏的初值。GET /statusline 与 statusline 帧同一份载荷，回来就当一帧处理
 func fetchStatusCmd(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
-		s, err := c.FetchStatusline()
-		if err != nil {
-			return statusMsg{}
-		}
-		return statusMsg{model: s.Model}
+		s, _ := c.FetchStatusline()
+		return eventMsg{Event: "statusline", Model: s.Model}
 	}
 }
 
@@ -105,16 +96,13 @@ func (sl statusline) render() string {
 	icons := sl.icons()
 	var segs []string
 	if sl.showModel && sl.model != "" {
-		segs = append(segs, slModelIconStyle.Render(icons.model)+" "+slModelTextStyle.Render(sl.model))
+		segs = append(segs, slModelStyle.Render(icons.model+" "+sl.model))
 	}
 	if sl.showDir && sl.dir != "" {
-		segs = append(segs, slDirIconStyle.Render(icons.dir)+" "+slDirTextStyle.Render(sl.dir))
+		segs = append(segs, slDirIconStyle.Render(icons.dir)+" "+slDirStyle.Render(sl.dir))
 	}
 	if sl.showGit && sl.branch != "" {
-		segs = append(segs, slGitIconStyle.Render(icons.git)+" "+slGitTextStyle.Render(sl.branch))
-	}
-	if len(segs) == 0 {
-		return ""
+		segs = append(segs, slGitStyle.Render(icons.git+" "+sl.branch))
 	}
 	return strings.Join(segs, statuslineSep)
 }
@@ -130,12 +118,9 @@ var statuslineCmd = client.Command{
 const statuslineUsage = "用法: /statusline [icons emoji|nerd] [enable|disable model|directory|git]"
 
 // applyStatuslineCmd 解析 /statusline 的参数（不含命令名本身），返回更新后的状态与提示文本。
-// 无参数 = 查看当前配置；参数不合法一律回退到原值 + 用法提示，绝不半改。
+// 参数不合法一律回退到原值 + 用法提示，绝不半改。无参数的 /statusline 开面板（见 submitInput）
 func (sl statusline) applyStatuslineCmd(rest string) (statusline, string) {
 	args := strings.Fields(rest)
-	if len(args) == 0 {
-		return sl, sl.describe()
-	}
 	if len(args) != 2 {
 		return sl, statuslineUsage
 	}
@@ -194,16 +179,4 @@ func (sl statusline) panel() *panel {
 		panelItem{label: "icons  nerd", mark: sl.iconSet == "nerd", submit: "/statusline icons nerd"},
 	)
 	return p
-}
-
-// describe 列出当前状态栏配置（/statusline 无参数时展示）
-func (sl statusline) describe() string {
-	seg := func(name string, on bool) string {
-		if on {
-			return name + ":on"
-		}
-		return name + ":off"
-	}
-	return "状态栏配置 — " + seg("model", sl.showModel) + " " + seg("directory", sl.showDir) +
-		" " + seg("git", sl.showGit) + " icons:" + sl.iconSet
 }

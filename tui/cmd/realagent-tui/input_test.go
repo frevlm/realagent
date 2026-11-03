@@ -2,14 +2,12 @@
 package main
 
 import (
-	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/ansi"
+	tea "charm.land/bubbletea/v2"
 )
 
-// 退格按字符走，不按字节 —— 老实现 s[:len(s)-1] 会把中文劈成半个字符
+// 退格按字符走，不按字节：中文不会被劈成半个字符
 func TestBackspaceRunes(t *testing.T) {
 	var e editor
 	e.insert("你好世界")
@@ -102,7 +100,8 @@ func TestKillOperations(t *testing.T) {
 // 粘贴整块进输入框（含换行），不当按键解释
 func TestPasteMultiline(t *testing.T) {
 	m := testModel()
-	m, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune("第一行\r\n第二行")})
+	nm, _ := m.Update(tea.PasteMsg{Content: "第一行\r\n第二行"})
+	m = nm.(model)
 	if got := m.ed.value(); got != "第一行\n第二行" {
 		t.Errorf("粘贴 = %q, want 第一行\\n第二行", got)
 	}
@@ -112,36 +111,13 @@ func TestPasteMultiline(t *testing.T) {
 func TestAltEnterInsertsNewline(t *testing.T) {
 	m := testModel()
 	m, _ = m.handleKey(keyRunes("第一行"))
-	m, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m, cmd := m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	if cmd != nil {
 		t.Error("alt+enter 不应发送")
 	}
 	m, _ = m.handleKey(keyRunes("第二行"))
 	if got := m.ed.value(); got != "第一行\n第二行" {
 		t.Errorf("alt+enter 应插入换行，got %q", got)
-	}
-}
-
-// 光标反显不该破坏折行宽度，也不该吞掉换行
-func TestEditorView(t *testing.T) {
-	var e editor
-	e.insert(strings.Repeat("中", 30))
-	rows := e.view(20)
-	for i, r := range rows {
-		if w := ansi.StringWidth(r); w > 20 {
-			t.Errorf("输入框第 %d 行宽度 %d 超出 20", i, w)
-		}
-	}
-	if !strings.HasPrefix(ansi.Strip(rows[0]), "> ") {
-		t.Errorf("首行应带提示符，got %q", ansi.Strip(rows[0]))
-	}
-
-	var e2 editor
-	e2.insert("上\n下")
-	e2.home()
-	e2.right() // 光标落在换行符上
-	if got := ansi.Strip(strings.Join(e2.view(20), "\n")); !strings.Contains(got, "下") {
-		t.Errorf("光标落在换行符上不应吞掉后续行，got %q", got)
 	}
 }
 
@@ -152,8 +128,8 @@ func TestSubmitEmpty(t *testing.T) {
 	if cmd != nil {
 		t.Error("空输入不应发送")
 	}
-	if len(m.lines) != 0 {
-		t.Errorf("空输入不应产生行，got %v", lineTexts(m))
+	if len(m.tr.items) != 0 {
+		t.Errorf("空输入不应产生条目，got %v", texts(m))
 	}
 }
 
@@ -165,7 +141,7 @@ func TestApprovalModalKeys(t *testing.T) {
 	if m2.approval == nil || m2.ed.value() != "" {
 		t.Error("模态下普通按键应被忽略")
 	}
-	m3, cmd := m.handleKey(key(tea.KeyEsc))
+	m3, cmd := m.handleKey(key(tea.KeyEscape))
 	if m3.approval != nil || cmd == nil {
 		t.Error("esc 应视为拒绝并回传 core")
 	}

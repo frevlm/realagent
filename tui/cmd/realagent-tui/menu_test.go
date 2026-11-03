@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"realagent/tui/internal/client"
 )
@@ -27,40 +27,6 @@ func typed(s string) model {
 	m := testModel()
 	m.ed.set(s)
 	return m
-}
-
-// lineTexts 返回行流的全部文本 —— altscreen 之后 m.lines 就是本次会话的全部输出，
-// 没有「已提交／未提交」这条边界了（ADR-0020）。
-func lineTexts(m model) []string {
-	var out []string
-	for _, l := range m.lines {
-		out = append(out, l.text)
-	}
-	return out
-}
-
-func key(k tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: k} }
-
-func keyRunes(s string) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
-}
-
-func TestMenuOpen(t *testing.T) {
-	cases := []struct {
-		input string
-		want  bool
-	}{
-		{"", false},
-		{"hello", false},
-		{"/", true},
-		{"/ne", true},
-		{"/new 1", true}, // menuOpen 只看前缀；含空格由 menuMatches 关闭
-	}
-	for _, c := range cases {
-		if got := typed(c.input).menuOpen(); got != c.want {
-			t.Errorf("menuOpen(%q) = %v, want %v", c.input, got, c.want)
-		}
-	}
 }
 
 func TestMenuMatches(t *testing.T) {
@@ -143,7 +109,7 @@ func TestEnterExecutesHighlighted(t *testing.T) {
 	if v := m.ed.value(); v != "" {
 		t.Errorf("发送后输入应清空，got %q", v)
 	}
-	if got := lineTexts(m); len(got) != 1 || got[0] != "/resume" {
+	if got := texts(m); len(got) != 1 || got[0] != "/resume" {
 		t.Errorf("应发送 /resume，got %v", got)
 	}
 }
@@ -155,7 +121,7 @@ func TestEnterNormalMessage(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter 应返回发送命令")
 	}
-	if got := lineTexts(m); len(got) != 0 {
+	if got := texts(m); len(got) != 0 {
 		t.Errorf("普通输入不该本地回显，got %v", got)
 	}
 	if v := m.ed.value(); v != "" {
@@ -163,22 +129,22 @@ func TestEnterNormalMessage(t *testing.T) {
 	}
 }
 
-// core 的 message_start 带正文回来，那一行才出现——多行按 \n 拆开
+// core 的 message_start 带正文回来，那条才出现——一条消息是一个条目，它的行不拆成多个条目
 func TestUserLineComesFromCore(t *testing.T) {
 	m := testModel()
-	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"第一行\n第二行"}`})
-	got := lineTexts(m)
-	if len(got) != 2 || got[0] != "第一行" || got[1] != "第二行" {
-		t.Errorf("用户行应由 message_start 带来并按行拆开，got %v", got)
+	m.handleEvent(client.Frame{Event: "message_start", Text: "第一行\n第二行"})
+	got := texts(m)
+	if len(got) != 1 || got[0] != "第一行\n第二行" {
+		t.Errorf("用户消息应是一个条目，got %v", got)
 	}
 }
 
 // 别的 agent 发来的消息与完成通知走的是同一条路（收件箱里都是 user 消息）
 func TestPeerMessageRendered(t *testing.T) {
 	m := testModel()
-	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"[a2 已完成] 干完了"}`})
-	if got := lineTexts(m); len(got) != 1 || got[0] != "[a2 已完成] 干完了" {
-		t.Errorf("完成通知应原样出现在行流里，got %v", got)
+	m.handleEvent(client.Frame{Event: "message_start", Text: "[a2 已完成] 干完了"})
+	if got := texts(m); len(got) != 1 || got[0] != "[a2 已完成] 干完了" {
+		t.Errorf("完成通知应原样出现在条目里，got %v", got)
 	}
 }
 
@@ -212,7 +178,7 @@ func TestUpDownWrap(t *testing.T) {
 
 // esc 只收菜单，不没收用户敲的字；再编辑则菜单复原
 func TestEscHidesMenuKeepsInput(t *testing.T) {
-	m, _ := typed("/re").handleKey(key(tea.KeyEsc))
+	m, _ := typed("/re").handleKey(key(tea.KeyEscape))
 	if v := m.ed.value(); v != "/re" {
 		t.Errorf("esc 不应清空输入，got %q", v)
 	}
@@ -226,7 +192,7 @@ func TestEscHidesMenuKeepsInput(t *testing.T) {
 }
 
 func TestSpaceClosesMenu(t *testing.T) {
-	m, _ := typed("/new").handleKey(key(tea.KeySpace))
+	m, _ := typed("/new").handleKey(keyRunes(" "))
 	if v := m.ed.value(); v != "/new " {
 		t.Fatalf("空格应进入输入，got %q", v)
 	}
@@ -256,17 +222,17 @@ func TestDescribeCommand(t *testing.T) {
 	}
 }
 
-// sendMsg 兜底：斜杠命令结果（ok:true）应渲染为 info 行
+// sendMsg 兜底：斜杠命令结果（ok:true）应渲染为 info 条目
 func TestCommandResultRendered(t *testing.T) {
 	m := testModel()
 	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "new"}})
 	m = nm.(model)
-	if len(m.lines) != 1 {
-		t.Fatalf("命令结果应产生 1 行，got %d", len(m.lines))
+	if len(m.tr.items) != 1 {
+		t.Fatalf("命令结果应产生 1 条，got %d", len(m.tr.items))
 	}
-	if m.lines[0].role != "info" || !strings.Contains(m.lines[0].text, "/new") {
-		t.Errorf("命令结果应为 info 渲染，got %+v", m.lines[0])
+	if m.tr.items[0].kind != kindInfo || !strings.Contains(texts(m)[0], "/new") {
+		t.Errorf("命令结果应为 info 渲染，got %+v", m.tr.items[0])
 	}
 	if m.awaiting {
 		t.Error("命令结果落地后不应再等 POST 兜底")
@@ -278,8 +244,8 @@ func TestCommandErrorRendered(t *testing.T) {
 	m.awaiting = true
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Error: "unknown command"}})
 	m = nm.(model)
-	if len(m.lines) != 1 || m.lines[0].role != "error" {
-		t.Fatalf("命令错误应渲染为 error，got %+v", m.lines)
+	if len(m.tr.items) != 1 || m.tr.items[0].kind != kindError {
+		t.Fatalf("命令错误应渲染为 error，got %+v", m.tr.items)
 	}
 }
 
@@ -287,10 +253,10 @@ func TestCommandErrorRendered(t *testing.T) {
 func TestSendFallbackIgnoredAfterStream(t *testing.T) {
 	m := testModel()
 	m.awaiting = true
-	m.handleEvent(client.Event{Type: "message_update", Payload: `{"delta":"已经在答了"}`})
+	m.handleEvent(client.Frame{Event: "message_update", Delta: "已经在答了"})
 	nm, _ := m.Update(sendMsg{reply: client.Reply{Ok: true, Command: "new"}})
 	m = nm.(model)
-	if got := lineTexts(m); len(got) != 1 || got[0] != "已经在答了" {
+	if got := texts(m); len(got) != 1 || got[0] != "已经在答了" {
 		t.Errorf("兜底不应覆盖流式内容，got %v", got)
 	}
 }

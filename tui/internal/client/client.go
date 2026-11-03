@@ -3,6 +3,7 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -89,16 +90,47 @@ func (c *Client) conv(body map[string]any) map[string]any {
 	return body
 }
 
-// Frame 是一条回放帧，与推送流的帧同形（ADR-0020）
+// Frame 是一帧事件。推送流与 GET /session 回放同形（ADR-0020），载荷在这里解一次。
+// 字段是 PROTOCOL.md 各帧载荷里客户端用得上的那些，帧没带的为零值。
 type Frame struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
+	Event string `json:"-"` // 帧名
+
+	Root      string `json:"root"`       // 哪段对话
+	SessionID string `json:"session_id"` // 谁说的：不等于 Root 就是它派生出去的子 agent
+
+	Text  string `json:"text"`  // message_start 的正文；tool_output 的一段输出
+	Delta string `json:"delta"` // message_update / thinking_update 的增量
+
+	Name   string `json:"name"`    // 工具名
+	ID     string `json:"id"`      // 工具调用 id；permission_request 的审批 id
+	CallID string `json:"call_id"` // tool_output 挂在哪次工具调用下面：就是 tool_execution_start 的 id
+	Status int    `json:"status"`  // tool_execution_end：非零 = 失败
+
+	Tool   string          `json:"tool"`   // permission_request 要用的工具
+	Params json.RawMessage `json:"params"` // permission_request 的工具参数，原样展示
+
+	Error string  `json:"error"` // turn_end：core 报的失败
+	Cost  float64 `json:"cost"`  // status_update / agent_end：本次跑的累计花费，算不出钱时不带
+	Model string  `json:"model"` // statusline
+}
+
+// UnmarshalJSON 解线上的一帧：推送流用 event 作键，回放用 type，载荷都在 data 里。
+// 载荷是开放键集（PROTOCOL.md status_update）：类型对不上的键留零值，其余照收
+func (f *Frame) UnmarshalJSON(b []byte) error {
+	type data Frame // 不带方法，免得解 data 时绕回这里
+	w := struct {
+		Event, Type string
+		Data        *data
+	}{Data: (*data)(f)}
+	_ = json.Unmarshal(b, &w)
+	f.Event = cmp.Or(w.Event, w.Type)
+	return nil
 }
 
 // FetchSession 取一段对话，回放成事件帧（GET /session）。读的是盘上那份。
 func (c *Client) FetchSession(sessionID string) ([]Frame, error) {
 	var f []Frame
-	err := c.getJSON("/session", &f, map[string]any{"workdir": c.workdir, "session_id": sessionID})
+	err := c.do(http.MethodGet, "/session", map[string]any{"workdir": c.workdir, "session_id": sessionID}, &f)
 	return f, err
 }
 
@@ -125,14 +157,14 @@ func (c *Client) RespondApproval(id string, allow bool) error {
 // FetchCommands 拉取斜杠命令列表：plugin 命令跟着工作目录走。
 func (c *Client) FetchCommands() ([]Command, error) {
 	var cmds []Command
-	err := c.getJSON("/commands", &cmds, map[string]any{"workdir": c.workdir})
+	err := c.do(http.MethodGet, "/commands", map[string]any{"workdir": c.workdir}, &cmds)
 	return cmds, err
 }
 
 // FetchSessions 拉这个目录下的对话清单（GET /sessions），最近的在前。
 func (c *Client) FetchSessions() ([]SessionInfo, error) {
 	var l []SessionInfo
-	err := c.getJSON("/sessions", &l, c.conv(nil))
+	err := c.do(http.MethodGet, "/sessions", c.conv(nil), &l)
 	return l, err
 }
 
@@ -160,14 +192,6 @@ func (c *Client) do(method, path string, body, out any) error {
 		return fmt.Errorf("解析响应失败: %s", string(data))
 	}
 	return nil
-}
-
-func (c *Client) getJSON(path string, out any, body ...any) error {
-	var b any
-	if len(body) > 0 {
-		b = body[0]
-	}
-	return c.do(http.MethodGet, path, b, out)
 }
 
 func (c *Client) postJSON(path string, body any) (Reply, error) {
@@ -202,7 +226,7 @@ type Statusline struct {
 
 func (c *Client) FetchStatusline() (Statusline, error) {
 	var s Statusline
-	err := c.getJSON("/statusline", &s)
+	err := c.do(http.MethodGet, "/statusline", nil, &s)
 	return s, err
 }
 
@@ -219,7 +243,7 @@ type Setup struct {
 
 func (c *Client) FetchSetup() (Setup, error) {
 	var s Setup
-	err := c.getJSON("/setup", &s)
+	err := c.do(http.MethodGet, "/setup", nil, &s)
 	return s, err
 }
 
@@ -252,14 +276,8 @@ func (c *Client) CloseGroup() error {
 	return err
 }
 
-// Event 是推送流中的一条事件
-type Event struct {
-	Type    string
-	Payload string // JSON
-}
-
-// SubscribeEvents 连上 /events，事件持续写进 ch；连接断开时关闭 ch 返回。阻塞调用。
-func (c *Client) SubscribeEvents(ch chan<- Event) error {
+// SubscribeEvents 连上 /events，帧持续写进 ch；连接断开时关闭 ch 返回。阻塞调用。
+func (c *Client) SubscribeEvents(ch chan<- Frame) error {
 	defer close(ch)
 	ws, _, err := websocket.DefaultDialer.Dial("ws://"+c.addr+"/events?client_id="+c.clientID, nil)
 	if err != nil {
@@ -267,13 +285,10 @@ func (c *Client) SubscribeEvents(ch chan<- Event) error {
 	}
 	defer ws.Close()
 	for {
-		var f struct {
-			Event string          `json:"event"`
-			Data  json.RawMessage `json:"data"`
-		}
+		var f Frame
 		if err := ws.ReadJSON(&f); err != nil {
 			return err
 		}
-		ch <- Event{Type: f.Event, Payload: string(f.Data)}
+		ch <- f
 	}
 }
