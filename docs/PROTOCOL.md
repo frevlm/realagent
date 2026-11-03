@@ -111,7 +111,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 
 - **不与 tool_result 二选一**：完整输出照旧随工具结果回到模型那边，这里推的只是"现在长什么样"，给的是人看的实时反馈。
 - `call_id` 是认领凭据——就是 `tool_execution_start` 那个 `id`，客户端靠它把碎片挂到对应那次调用下面。
-- **按行推，但不保证一帧一行**：超长行会被切成几帧，最后一段可能没有换行符。客户端要按"续写"处理，不能假设一帧即一行（TUI 按 `call_id` 找到那次调用，把碎片接在它的输出后面，见 tui/cmd/realagent-tui/main.go 的 `tool_output` 分支，ADR-0033）。
+- **按行推，但不保证一帧一行**：超长行会被切成几帧，最后一段可能没有换行符。客户端要按"续写"处理，不能假设一帧即一行（TUI 按 `call_id` 找到那次调用，把碎片接在它的输出后面，见 tui/cmd/realagent-tui/main.go 的 `tool_output` 分支，ADR-0034）。
 - **一条流，不分家**：`stream` 恒为 `output`——bash 的 stdout 与 stderr 接在同一个管道上（ADR-0017）。报错原文是模型判断该不该重试的唯一依据，只推 stdout 等于把它扔了；合流而不是两个管道，是因为交错顺序就是人在终端里看见的顺序，而"哪一行来自哪条流"没有第二个读者。
 - **谁推谁负责**：帧由工具自己发出（bash 的读循环：`core/src/tools/tools.cpp`），不具备实时输出的工具就不发这个帧。
 - 输出超上限后**只吞不推**（core-tools 为 `MAX_OUT`）：管道仍要读干净，中途撒手等于给命令一个 SIGPIPE。

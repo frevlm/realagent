@@ -39,7 +39,7 @@ QUIC 服务架构（ADR-0006）使 TUI 语言不受 C++ 约束。用户："因�
 > 另外状态栏与**状态行**（读秒行，`status_update` 帧）是两个东西，见 PROTOCOL.md。
 
 > **实况注（2026-11-03）：上表 OpenCode 那一行已经过时。** OpenCode 1.0 把 Go + Bubble Tea 的 TUI 换成了自研的 OpenTUI（Zig + SolidJS），release notes 说旧 TUI "had performance and capability issues"。
-> 本项目仍选 Go：实测到的毛病（光标不在输入处、帧不是一次画完）都出在 Bubble Tea v1 的渲染器上，v2 已经解决；Charm 自己的 Crush 是 Go + v2。迁移与布局的改动见 ADR-0033。
+> 本项目仍选 Go：实测到的毛病（光标不在输入处、帧不是一次画完）都出在 Bubble Tea v1 的渲染器上，v2 已经解决；Charm 自己的 Crush 是 Go + v2。迁移与布局的改动见 ADR-0034。
 
 ## 后果
 

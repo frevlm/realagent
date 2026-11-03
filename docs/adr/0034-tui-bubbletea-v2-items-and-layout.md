@@ -1,4 +1,4 @@
-# ADR-0033：TUI 换 Bubble Tea v2；对话按条目存；画面按区域排
+# ADR-0034：TUI 换 Bubble Tea v2；对话按条目存；画面按区域排
 
 - 状态：已采纳（2026-11-03）
 - 依赖：ADR-0007（Go + Bubble Tea）、ADR-0020（altscreen，历史从会话记录渲染）
