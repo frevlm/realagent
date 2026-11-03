@@ -8,7 +8,7 @@ namespace {
 const nlohmann::json &table()
 {
     static const nlohmann::json k = nlohmann::json::array(
-        {read_def(), search_def(), edit_def(), spawn_def(), send_message_def(), bash_def()});
+        {read_def(), search_def(), edit_def(), spawn_def(), bash_def()});
     return k;
 }
 

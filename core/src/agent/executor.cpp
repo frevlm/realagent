@@ -2,7 +2,10 @@
 
 #include "agent/agents.hpp"
 
+#include <chrono>
 #include <cstdio>
+#include <future>
+#include <utility>
 
 namespace realagent {
 
@@ -97,8 +100,8 @@ nlohmann::json Executor::execute(const std::string &call_id, const std::string &
     nlohmann::json r;
     if (!tool_server(*tool).empty())
         r = mcp_call(*tool, params);
-    else if (name == "spawn" || name == "send_message")
-        r = agent_tool(name, params);
+    else if (name == "spawn")
+        r = spawn(params);
     else
         r = run_tool(call_id, name, params, ctx_.emit_fn, workdir_, &interrupted_);
     r["interrupted"] = interrupted_.load();
@@ -112,36 +115,12 @@ nlohmann::json Executor::execute(const std::string &call_id, const std::string &
     return r;
 }
 
-namespace {
-/* 整数数组参数；缺失或形状不对当空。 */
-std::vector<int> id_list(const nlohmann::json &p, std::string_view key)
+nlohmann::json Executor::spawn(const nlohmann::json &params)
 {
-    std::vector<int> out;
-    const auto it = p.find(key);
-    if (it == p.end() || !it->is_array()) return out;
-    for (const auto &v : *it)
-        if (v.is_number_integer()) out.push_back(v.get<int>());
-    return out;
-}
-} // namespace
-
-nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::json &params)
-{
-    if (!pool_) return tool_fail("no agent graph here");
+    if (!pool_) return tool_fail("spawn is not available here");
     const auto str = [&params](std::string_view k) { return tool_arg(params, k).value_or(""); };
 
-    if (name == "send_message")
-    {
-        const auto to = params.find("to");
-        if (to == params.end() || !to->is_number_integer())
-            return tool_fail("send_message is missing or has an invalid target agent id: to");
-        // 没有边就跟不存在一样：不告诉它「有，但你够不着」
-        if (!pool_->send(agent_id_, to->get<int>(), str("text")))
-            return tool_fail("no such agent: " + std::to_string(to->get<int>()));
-        return tool_ok("sent to " + std::to_string(to->get<int>()));
-    }
-
-    // spawn：`agent` 查的是写进本 agent system prompt 的那张表
+    // `agent` 查的是写进本 agent system prompt 的那张表
     std::string def_body;
     if (const std::string want = str("agent"); !want.empty())
     {
@@ -153,13 +132,33 @@ nlohmann::json Executor::agent_tool(const std::string &name, const nlohmann::jso
         def_body = d->body;
     }
 
+    struct Outcome {
+        std::string answer, error;
+    };
+    std::promise<Outcome> done;
+    std::future<Outcome> got = done.get_future();
+    bool fired = false; // promise 只能兑现一次
     std::string err;
-    const int id = pool_->spawn(agent_id_, str("workdir"), id_list(params, "in_edges"),
-                                id_list(params, "out_edges"), err, def_body, str("prompt"));
-    if (id <= 0) return tool_fail(err);
+    const std::string workdir = str("workdir").empty() ? workdir_ : str("workdir");
+    std::shared_ptr<Agent> child = pool_->spawn(
+        agent_id_, workdir, def_body,
+        [&done, &fired](const std::string &answer, const std::string &error) {
+            if (!std::exchange(fired, true)) done.set_value({answer, error});
+        },
+        err);
+    if (!child) return tool_fail(err);
+    child->post(str("prompt"));
+    // 中断要一直往下传：子 agent 开跑时会清掉自己的中断标志，只传一次可能落空
+    while (got.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready)
+        if (interrupted_) child->interrupt();
+    const std::string sid = child->session_id();
+    child.reset(); // 在这里析构：join 它的线程，MCP 租约随之归还
     // 会话 id 是给客户端的：回放时它凭这个把子 agent 的过程嵌回这张工具卡片下面
-    const auto child = pool_->node(id); // 关组可能抢在这一句前面
-    return tool_ok(std::to_string(id) + (child ? " (session " + child->session_id() + ")" : ""));
+    const std::string tail = "\n\n(session " + sid + ")";
+    if (interrupted_) return tool_fail("interrupted by user" + tail);
+    const Outcome o = got.get();
+    if (!o.error.empty()) return tool_fail("the agent stopped on an error: " + o.error + tail);
+    return tool_ok((o.answer.empty() ? "(the agent finished without a final message)" : o.answer) + tail);
 }
 
 } // namespace realagent

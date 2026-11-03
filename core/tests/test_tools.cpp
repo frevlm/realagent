@@ -136,10 +136,10 @@ int main()
 
     printf("== 工具清单 ==\n");
     {
-        // 一个工具一个文件，read/edit/bash 自带实现，spawn/send_message 由 Executor 实现——
-        // 定义都在同一张表里，LLM 看见的清单只有一份（ADR-0019）
-        CHECK(tool_defs().size() == 6, "六个工具");
-        CHECK(find_tool("spawn") && find_tool("send_message"), "两个 agent 级工具在同一张表里");
+        // 一个工具一个文件，read/edit/bash 自带实现，spawn 由 Executor 实现——
+        // 定义都在同一张表里，LLM 看见的清单只有一份（ADR-0033）
+        CHECK(tool_defs().size() == 5, "五个工具");
+        CHECK(find_tool("spawn") != nullptr, "spawn 与文件工具在同一张表里");
         const nlohmann::json *r = find_tool("read");
         const nlohmann::json *e = find_tool("edit");
         const nlohmann::json *b = find_tool("bash");

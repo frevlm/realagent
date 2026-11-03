@@ -173,15 +173,6 @@ func TestUserLineComesFromCore(t *testing.T) {
 	}
 }
 
-// 别的 agent 发来的消息与完成通知走的是同一条路（收件箱里都是 user 消息）
-func TestPeerMessageRendered(t *testing.T) {
-	m := testModel()
-	m.handleEvent(client.Event{Type: "message_start", Payload: `{"role":"user","text":"[a2 已完成] 干完了"}`})
-	if got := lineTexts(m); len(got) != 1 || got[0] != "[a2 已完成] 干完了" {
-		t.Errorf("完成通知应原样出现在行流里，got %v", got)
-	}
-}
-
 func TestTabCompletes(t *testing.T) {
 	m, _ := typed("/").handleKey(key(tea.KeyTab))
 	if v := m.ed.value(); v != "/model" {

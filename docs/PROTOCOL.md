@@ -77,7 +77,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | type | 载荷 | 说明 | 实现 |
 |---|---|---|---|
 | `message_update` | delta 文本 | LLM 流式增量 | ✅ |
-| `message_start` | `{role, text}` | 一条 user 消息进了收件箱。**正文随帧走**：收件箱三种来源都是 user 消息（人发的、别的 agent 用 `send_message` 投的、别的 agent 跑完沿入边广播的完成通知），后两种客户端根本没打过，靠"我刚才输入了什么"渲染不出来（ADR-0019 §5）。客户端因此不本地回显，实时与回放走同一段代码。assistant 消息不发这个帧 | ✅ |
+| `message_start` | `{role, text}` | 一条 user 消息进了收件箱。**正文随帧走**：子 agent 收到的任务是 `spawn` 交的，客户端根本没打过，靠"我刚才输入了什么"渲染不出来（ADR-0033）。客户端因此不本地回显，实时与回放走同一段代码。assistant 消息不发这个帧 | ✅ |
 | `message_end` | 消息结构 | 消息生命周期 | ❌ 未实现——收工靠 `agent_end` |
 | `thinking_start/update/stop` | signature / delta / 空 | 模型思考过程（DeepSeek v4 reasoning），流式增量与 message_update 同语义 | ✅ |
 | `tool_output` | `{call_id, stream, text}` | 工具边跑边推的输出（stdout 与 stderr 合流，见下） | ✅ |
@@ -88,7 +88,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `permission_request` | `{id, tool, params, root, session_id}` | 审批请求（可靠，卡点）。**不按「当前看着哪段对话」过滤**：客户端不管在看哪段都要弹，靠 `root` / `session_id` 说明是子任务还是另一段对话在问。过滤会让一段没人看的对话静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**那一组没有客户端连着推送流时当场拒绝**，不等那 30 秒 | ✅ |
 | `interrupted` | 空对象 | `POST /interrupt` 生效——agent 在某个检查点停了。此后本次 run 不再有帧 | ✅ |
 | `agent_start` | 空对象 | 一次「跑」开始：agent 从 idle 醒了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
-| `agent_end` | `{cost, recap}` | 一次「跑」收工，**唯一的收工信号**：收工判定说这趟到头了，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。**这一帧在完成通知投出、自己不再算在跑之后才发**，所以收到它再问 `GET /sessions` 拿到的就是真相（ADR-0031）。`cost` 是本次跑的累计花费（含判定那次调用），`recap` 是这一趟的回顾（没配小模型时为空串，ADR-0025） | ✅ |
+| `agent_end` | `{cost, recap}` | 一次「跑」收工，**唯一的收工信号**：收工判定说这趟到头了，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。**这一帧在自己不再算在跑之后才发**，所以收到它再问 `GET /sessions` 拿到的就是真相（ADR-0031）。`cost` 是本次跑的累计花费（含判定那次调用），`recap` 是这一趟的回顾（没配小模型时为空串，ADR-0025） | ✅ |
 
 ### statusline 帧
 

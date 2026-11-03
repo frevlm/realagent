@@ -726,7 +726,7 @@ func (m *model) handleEvent(ev client.Event) tea.Cmd {
 }
 
 // subEvent 画子 agent 的动静：一行一条，缩进挂在父对话里。正文与思考不铺开——
-// 两段文字交错着长，行流就乱了；它干完了什么，完成通知会以 user 消息回到父对话。
+// 两段文字交错着长，行流就乱了；它干完了什么，作为 spawn 的结果回到父对话。
 // 读秒行与 awaiting 只归父对话管：子 agent 收工不是这段对话收工。
 func (m *model) subEvent(ev client.Event) {
 	var d struct {

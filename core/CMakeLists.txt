@@ -72,7 +72,6 @@ add_library(realagent_core_lib STATIC
   src/tools/edit.cpp
   src/tools/bash.cpp
   src/tools/spawn.cpp
-  src/tools/send_message.cpp
   src/agent/executor.cpp
   src/agent/approval.cpp
   src/agent/agent.cpp

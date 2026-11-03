@@ -2,7 +2,7 @@
  * tools.hpp — 内置工具：一张表、按名派发，外加每个工具自己的定义与实现
  *
  * 一个工具一个文件（src/tools/*.cpp），描述与实现住在一起。
- * spawn / send_message 只有定义：它们要认识 Agents，实现在 Executor 里。
+ * spawn 只有定义：它要认识 Agents，实现在 Executor 里。
  * edit 只有「把一段行范围换成一段文本」一个操作，创建文件也是它（ADR-0018）。
  */
 #pragma once
@@ -164,6 +164,5 @@ nlohmann::json bash_run(const std::string &call_id, const nlohmann::json &params
                         const std::atomic<bool> *abort);
 
 nlohmann::json spawn_def();
-nlohmann::json send_message_def();
 
 } // namespace realagent
