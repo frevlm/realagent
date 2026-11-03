@@ -10,6 +10,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -31,6 +32,9 @@ namespace realagent {
 
 class Agents;
 
+/* 一趟收工时交出去的：最后那段 assistant 正文，与这一趟停在哪个错误上（正常收工为空）。 */
+using OnDone = std::function<void(const std::string &answer, const std::string &error)>;
+
 /* 一次 LLM 调用的产出 */
 struct LlmOutcome {
     std::string text;
@@ -51,13 +55,16 @@ class Agent {
   public:
     /* ctx 拷一份留着：事件出口与「有没有人能裁决」是这个 agent 那一组的。
      * workdir 必传，工具的相对路径从它算起。
+     * pool 非空 = 这是一段对话，能 spawn；子 agent 传空，它不能再派生（ADR-0033）。
      * session_dir 为空就落 sessions_dir(workdir)；派生的由 Agents 指到对话那一头的 sub/。
      * root = 用户看见的那段对话的 session_id，为空就是自己（ADR-0029）。
      * def_body = agent 定义正文，接在 system prompt 末尾。
-     * session_id 为空就开一个新会话；盘上有就接着它往下说。 */
+     * session_id 为空就开一个新会话；盘上有就接着它往下说。
+     * on_done 每趟收工调一次。 */
     Agent(CoreContext ctx, ApprovalCoordinator &approval, std::string workdir, int id,
           Agents *pool = nullptr, std::string session_dir = {}, std::string root = {},
-          std::string def_body = {}, std::string session_id = {});
+          std::string def_body = {}, std::string session_id = {},
+          OnDone on_done = {});
     ~Agent();
 
     int id() const { return id_; }
@@ -76,9 +83,9 @@ class Agent {
      * source 是 Claude Code 的词：startup / clear / resume。 */
     void session_start_hook(const std::string &source);
 
-    /* 投一条消息进收件箱（人、别的 agent、完成通知都走这里）。正在跑也照投，
-     * 下一个 turn 开头取走。notice = 这是一条完成通知。 */
-    void post(std::string message, bool notice = false);
+    /* 投一条消息进收件箱（人发的、spawn 交的活都走这里）。正在跑也照投，
+     * 下一个 turn 开头取走。 */
+    void post(std::string message);
 
     /* 有活：在跑，或收件箱里有还没取走的。 */
     bool running();
@@ -102,7 +109,7 @@ class Agent {
     bool decide();
     std::string recap();
 
-    /* 一趟的两条边沿：开跑上 run_mtx_，收工解锁并通知邻居。 */
+    /* 一趟的两条边沿：开跑上 run_mtx_，收工解锁并交出 on_done。 */
     void start_run(std::unique_lock<std::mutex> &busy);
     void finish_run(std::unique_lock<std::mutex> &busy);
 
@@ -123,7 +130,8 @@ class Agent {
     void broadcast(const std::string &type, const nlohmann::json &payload);
 
     CoreContext ctx_;        // 排第一：exe_ 拿的是它的引用
-    Agents *pool_ = nullptr; // 测试里独立构造时为空
+    Agents *pool_ = nullptr; // 子 agent 与测试里独立构造时为空
+    OnDone on_done_;
     int id_ = 0;
     std::string workdir_;
     /* 以下几样建 agent 时扫一次，之后不变。mcp_ / hooks_ / agent_defs_ 要排在 exe_ 前面：
@@ -143,20 +151,16 @@ class Agent {
     std::string def_body_;
     ContextSession context_session_; // 增量上下文协议的状态（配置开关控制用不用）
 
-    size_t run_begin_ = 0; // 这一趟开跑时历史的长度：收工判定的抄本从这里取
-    std::string recap_;    // 小模型写的 recap；没配小模型时为空
-    int stall_ = 0;        // 连着几次打回后主模型仍一个工具都没调
-    double run_cost_ = 0;  // 这一趟累计花费
+    size_t run_begin_ = 0;  // 这一趟开跑时历史的长度：收工判定的抄本从这里取
+    std::string recap_;     // 小模型写的 recap；没配小模型时为空
+    std::string run_error_; // 这一趟停在哪个错误上；正常收工为空
+    int stall_ = 0;         // 连着几次打回后主模型仍一个工具都没调
+    double run_cost_ = 0;   // 这一趟累计花费
     std::atomic<bool> abort_{false};
 
     std::mutex mtx_; // 护 inbox_ / closing_
     std::condition_variable cv_;
-    struct Mail {
-        std::string text;
-        bool notice; // 完成通知：只是消息，不是请求
-    };
-    std::deque<Mail> inbox_;
-    bool asked_ = false; // 这一趟收到过不是完成通知的东西
+    std::deque<std::string> inbox_;
     bool closing_ = false;
     std::atomic<bool> running_{false};
     std::mutex run_mtx_; // 一趟期间持有

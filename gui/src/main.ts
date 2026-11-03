@@ -140,7 +140,7 @@ function endAll(p: Pane) { endThink(p); endText(p); }
 
 const TOOLS: Record<string, [Icon, string]> = {
   bash: ["terminal", "执行命令"], read: ["file", "读文件"], edit: ["pencil", "改文件"],
-  search: ["search", "搜代码"], spawn: ["fork", "派生子任务"], send_message: ["send", "发消息"],
+  search: ["search", "搜代码"], spawn: ["fork", "派生子任务"],
 };
 const toolIcon = (n: string): Icon => TOOLS[n]?.[0] ?? "wrench";
 const toolVerb = (n: string) => TOOLS[n]?.[1] ?? `调用 ${n}`;
@@ -191,8 +191,9 @@ function toolOut(p: Pane, d: { call_id: string; text?: string }, replay: boolean
   if (!replay) card.classList.add("open");
   out.scrollTop = out.scrollHeight;
   follow();
-  // 回放时 spawn 的结果里写着子 agent 的会话：在卡片下面挂一块，点开再读
-  const sid = card.dataset.name === "spawn" && d.text?.match(/\(session (\S+)\)/)?.[1];
+  // 回放时 spawn 的结果末尾写着子 agent 的会话：在卡片下面挂一块，点开再读。
+  // 取最后一处：前面是子 agent 的正文，里面写什么都可能
+  const sid = card.dataset.name === "spawn" && [...(d.text ?? "").matchAll(/\(session (\S+)\)/g)].pop()?.[1];
   if (sid) subBlock(sid, card);
 }
 

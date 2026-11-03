@@ -1,6 +1,7 @@
 # ADR-0029：客户端只认对话，agent 退回 core 内部
 
 - 状态：已采纳（2026-10-08）
+- 部分被取代：ADR-0033（完成通知已删除，§代价里关于它的两条规则随之作废）
 - 取代：ADR-0019 §3（`POST /agent` 对外一个端点）、§10（`GET /agents`、`GET /sessions` 的 `opened_by`）、§6 中「每帧带 `agent_id`、core 不为任何 agent 过滤」那一句
 - 取代：ADR-0020 中「TUI 选一个 agent 连上去看」的读法——切的是对话，不是 agent
 - 补充：ADR-0021（组照旧；组内寻址从 `agent_id` 换成 `session_id`）

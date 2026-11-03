@@ -1,7 +1,5 @@
 #include "agent/agent.hpp"
 
-#include "agent/agents.hpp"
-
 #include "llm/systemone.hpp"
 #include "llm/transport.hpp"
 
@@ -42,8 +40,9 @@ constexpr int kMaxStall = 3;
 
 Agent::Agent(CoreContext ctx, ApprovalCoordinator &approval, std::string workdir, int id,
              Agents *pool, std::string session_dir, std::string root, std::string def_body,
-             std::string session_id)
-    : ctx_(std::move(ctx)), pool_(pool), id_(id), workdir_(std::move(workdir)),
+             std::string session_id, OnDone on_done)
+    : ctx_(std::move(ctx)), pool_(pool), on_done_(std::move(on_done)), id_(id),
+      workdir_(std::move(workdir)),
       mcp_(ctx_.mcp ? ctx_.mcp->open(workdir_, ctx_.config->get_json("mcp_http_bridge"))
                     : McpHub::Lease{}),
       hooks_(Hooks::scan(workdir_)), agent_defs_(scan_agent_defs(workdir_)),
@@ -82,11 +81,11 @@ std::vector<std::string> Agent::plugin_errors() const
     return all;
 }
 
-void Agent::post(std::string message, bool notice)
+void Agent::post(std::string message)
 {
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        inbox_.push_back({std::move(message), notice});
+        inbox_.push_back(std::move(message));
     }
     cv_.notify_one();
 }
@@ -172,7 +171,7 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSe
         fprintf(stderr, "[agent] %s\n", out.error.c_str());
         return false;
     };
-    // 别的入口（send_message、完成通知）也会走到这里，所以每次都查
+    // 端点可能在运行中被 POST /setup 改掉，所以每次都查
     if (std::string e = endpoint_config_error(*ctx_.config); !e.empty()) return fail(std::move(e));
 
     const std::string model = dialog.value("model", std::string());
@@ -221,8 +220,7 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSe
 std::string Agent::system_prompt() const
 {
     const auto section = [](const std::string &s) { return s.empty() ? s : "\n\n" + s; };
-    return "You are a helpful coding agent. Your agent id is " + std::to_string(id_) +
-           ". Your working directory is " + workdir_ +
+    return "You are a helpful coding agent. Your working directory is " + workdir_ +
            ".\n"
            "You run in an autonomous loop: keep calling tools until the user's request is fully "
            "handled. When you have no next action left, write your final answer and call no tools. "
@@ -234,7 +232,9 @@ std::string Agent::system_prompt() const
 
 json Agent::build_dialog(ModelTier tier) const
 {
-    json tools = tool_defs();
+    json tools = json::array();
+    for (const json &t : tool_defs())
+        if (pool_ || t["name"] != "spawn") tools.push_back(t); // 子 agent 不再派生（ADR-0033）
     for (const json &t : mcp_.tools) tools.push_back(t);
     for (auto &t : tools) t.erase("_core");
     return json{{"model", ctx_.config->model(tier)},
@@ -264,7 +264,7 @@ void Agent::start_run(std::unique_lock<std::mutex> &busy)
     ensure_loaded();
     run_begin_ = messages_.size();
     recap_.clear();
-    asked_ = false;
+    run_error_.clear();
     stall_ = 0;
     run_cost_ = 0;
     abort_.store(false);
@@ -272,12 +272,11 @@ void Agent::start_run(std::unique_lock<std::mutex> &busy)
     broadcast("agent_start", json::object());
 }
 
-/* 顺序是契约：先通知邻居、再落 running_、最后发 agent_end。于是客户端收到任何一个
- * agent_end 时问 GET /sessions，拿到的就是真相——被通知叫醒的那个已经在收件箱里排着，
- * 发帧的这个已经不算在跑。反过来排，最后一个收工帧之后问到的仍是 running，再也等不到下一帧。 */
+/* 顺序是契约：先落 running_、再发 agent_end。于是客户端收到对话的 agent_end 时问
+ * GET /sessions，拿到的就是真相；反过来排，问到的仍是 running，再也等不到下一帧。 */
 void Agent::finish_run(std::unique_lock<std::mutex> &busy)
 {
-    const std::string summary = recap_.empty() ? last_text() : recap_; // 丢历史之前取
+    const std::string answer = last_text(); // 丢历史之前取
     {
         // 收件箱空了就把历史还给盘：内存里那份只是盘上的副本
         std::lock_guard<std::mutex> lk(mtx_);
@@ -287,12 +286,10 @@ void Agent::finish_run(std::unique_lock<std::mutex> &busy)
             loaded_ = false;
         }
     }
-    busy.unlock(); // on_done 要动别的 agent，别攥着自己的锁
-    // 两种收工不通知邻居：只由完成通知唤醒的那一趟（那只是回声，环上会无限互相唤醒）；
-    // 被中断的那一趟（没跑完，而且用户正要停下整段对话，通知会把刚停下的又叫醒）
-    if (pool_ && asked_ && !abort_.load()) pool_->on_done(id_, summary);
+    busy.unlock();
     running_.store(false);
     broadcast("agent_end", json{{"cost", run_cost_}, {"recap", recap_}});
+    if (on_done_) on_done_(answer, run_error_); // 最后：spawn 那头拿到它就会析构这个 agent
 }
 
 bool Agent::running()
@@ -313,12 +310,12 @@ void Agent::record_user(const std::string &text)
 /* 收件箱只在 turn 开头取，于是模型思考或跑工具时不会被打断。 */
 void Agent::take_inbox()
 {
-    std::deque<Mail> incoming;
+    std::deque<std::string> incoming;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         incoming.swap(inbox_);
     }
-    for (const auto &[m, notice] : incoming)
+    for (const std::string &m : incoming)
     {
         // UserPromptSubmit 的注入附在消息后面，不进 system prompt（那会打碎 prompt cache）
         const HookOutcome h = hooks_.run(HookEvent::UserPromptSubmit,
@@ -328,7 +325,6 @@ void Agent::take_inbox()
             fprintf(stderr, "[hook] UserPromptSubmit 拦下一条消息：%s\n", h.reason.c_str());
             continue;
         }
-        asked_ = asked_ || !notice;
         record_user(h.inject.empty() ? m : m + "\n\n" + h.inject);
     }
 }
@@ -447,6 +443,10 @@ void Agent::loop()
         broadcast("interrupted", json::object());
         return true;
     };
+    const auto fail_turn = [this](std::string why) {
+        broadcast("turn_end", json{{"error", why}});
+        run_error_ = std::move(why);
+    };
 
     for (;;)
     {
@@ -471,7 +471,7 @@ void Agent::loop()
         {
             if (!abort_.load())
             {
-                broadcast("turn_end", json{{"error", out.error.empty() ? "llm_call failed" : out.error}});
+                fail_turn(out.error.empty() ? "llm_call failed" : out.error);
                 continue;
             }
             // 被中断：要的工具不算数（留着就是没人应答的 tool_use），收到的正文留下
@@ -485,7 +485,7 @@ void Agent::loop()
         // 空回答不落盘：空 text 块会让这个会话之后每轮都 400
         if (out.text.empty() && out.thinking.empty() && out.tool_uses.empty())
         {
-            broadcast("turn_end", json{{"error", "端点没有返回任何内容（HTTP 2xx 但流里一个事件都没有）"}});
+            fail_turn("端点没有返回任何内容（HTTP 2xx 但流里一个事件都没有）");
             fprintf(stderr, "[agent] 空回答：不写入会话\n");
             continue;
         }

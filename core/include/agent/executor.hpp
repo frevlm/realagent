@@ -26,7 +26,7 @@ class Agents;
 
 class Executor {
   public:
-    /* pool / agent_id：spawn 与 send_message 要用；pool 为空时这两个工具报错。
+    /* pool / agent_id：spawn 要用；pool 为空时 spawn 报错（子 agent 就是这样）。
      * mcp / hooks / defs 归 Agent 所有，这里只读；为空就是没有。 */
     Executor(CoreContext &ctx, ApprovalCoordinator &approval, std::string workdir,
              Agents *pool = nullptr, int agent_id = 0, const McpHub::Lease *mcp = nullptr,
@@ -51,7 +51,8 @@ class Executor {
     void reset() { interrupted_ = false; }
 
   private:
-    nlohmann::json agent_tool(const std::string &name, const nlohmann::json &params);
+    /* 派生一个子 agent，阻塞到它跑完，交回它最后那段正文（ADR-0033）。 */
+    nlohmann::json spawn(const nlohmann::json &params);
     nlohmann::json mcp_call(const nlohmann::json &tool, const nlohmann::json &params);
 
     CoreContext &ctx_;
