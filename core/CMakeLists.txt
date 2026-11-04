@@ -75,6 +75,7 @@ add_library(realagent_core_lib STATIC
   src/agent/executor.cpp
   src/agent/approval.cpp
   src/agent/agent.cpp
+  src/agent/compact.cpp
   src/agent/verdict.cpp
   src/agent/agents.cpp
   src/agent/command.cpp

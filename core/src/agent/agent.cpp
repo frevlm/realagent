@@ -1,11 +1,13 @@
 #include "agent/agent.hpp"
 
+#include "agent/compact.hpp"
 #include "llm/systemone.hpp"
 #include "llm/transport.hpp"
 
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <utility>
 
 namespace realagent {
 
@@ -26,6 +28,11 @@ EmitFn stamped(EmitFn inner, const std::string &session_id, const std::string &r
 }
 
 json text_block(std::string text) { return json{{"type", "text"}, {"text", std::move(text)}}; }
+
+json user_msg(std::string text)
+{
+    return json{{"role", "user"}, {"content", json::array({text_block(std::move(text))})}};
+}
 
 json tool_result_msg(const std::string &id, json content, bool is_error)
 {
@@ -91,11 +98,22 @@ void Agent::post(std::string message)
     cv_.notify_one();
 }
 
+void Agent::request_compact(std::string instructions)
+{
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        compact_req_ = std::move(instructions);
+    }
+    cv_.notify_one();
+}
+
 void Agent::ensure_loaded()
 {
     if (loaded_) return;
     if (!Session::read(session_dir_, session_.id(), messages_))
         messages_ = json::array(); // 还没写过盘
+    // 压缩过就从最后一条摘要读起：之前的留在盘上给回放看，不再发给模型（ADR-0036）
+    messages_.erase(messages_.begin(), messages_.begin() + static_cast<std::ptrdiff_t>(compact_begin(messages_)));
     loaded_ = true;
 }
 
@@ -183,6 +201,7 @@ void Agent::on_llm_event(std::string_view type, const json &ev, LlmOutcome &out,
     {
         // usage 不原样上传：换成钱报（算不出就不报），主模型这次的提示词大小与缓存命中报给状态栏
         json st = silent ? json::object() : prompt_readout(ev);
+        if (!silent) context_used_ = st.value("context_tokens", 0LL) + ev.value("output", 0LL);
         if (const double cost = ctx_.pricing ? ctx_.pricing->cost(model, ev) : 0; cost > 0)
         {
             out.cost = cost;
@@ -247,7 +266,10 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSe
         }
         // 真因优先：HTTP 状态 > 解析失败（它引起的传输中止不是真因）> 传输错误
         if (std::string e = http_status_error(r.status, r.error_body); !e.empty())
+        {
+            out.overflow = context_overflow(r.status, r.error_body);
             return fail(std::move(e));
+        }
         if (r.sink_failed) return fail("解析响应失败（见 core 日志）");
         if (!r.error.empty()) return fail(r.error);
         if (cs) cs->on_response(r.revlm_stored);
@@ -340,7 +362,7 @@ void Agent::finish_run(std::unique_lock<std::mutex> &busy)
 bool Agent::running()
 {
     std::lock_guard<std::mutex> lk(mtx_);
-    return running_.load() || !inbox_.empty();
+    return running_.load() || !inbox_.empty() || compact_req_;
 }
 
 /* —— 入账 —— */
@@ -348,18 +370,19 @@ bool Agent::running()
 /* 从外面来的输入一律是 user。正文随帧走，回放历史与实时看长得一样。 */
 void Agent::record_user(const std::string &text)
 {
-    record(json{{"role", "user"}, {"content", json::array({text_block(text)})}});
+    record(user_msg(text));
     broadcast("message_start", json{{"role", "user"}, {"text", text}});
 }
 
 /* 收件箱只在 turn 开头取，于是模型思考或跑工具时不会被打断。 */
-void Agent::take_inbox()
+size_t Agent::take_inbox()
 {
     std::deque<std::string> incoming;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         incoming.swap(inbox_);
     }
+    size_t taken = 0;
     for (const std::string &m : incoming)
     {
         // UserPromptSubmit 的注入附在消息后面，不进 system prompt（那会打碎 prompt cache）
@@ -371,7 +394,9 @@ void Agent::take_inbox()
             continue;
         }
         record_user(h.inject.empty() ? m : m + "\n\n" + h.inject);
+        ++taken;
     }
+    return taken;
 }
 
 /* 块序由协议定：thinking、正文、tool_use。 */
@@ -463,10 +488,9 @@ std::string Agent::recap()
 {
     const std::string model = ctx_.config->model(ModelTier::Small);
     if (model.empty()) return {};
-    const json prompt = text_block(recap_prompt(run_transcript(messages_, run_begin_)));
     const json d{{"model", model},
                  {"system", recap_system()},
-                 {"messages", json::array({json{{"role", "user"}, {"content", json::array({prompt})}}})}};
+                 {"messages", json::array({user_msg(recap_prompt(run_transcript(messages_, run_begin_)))})}};
     LlmOutcome out;
     const bool ok = llm_call(d, out, /*silent=*/true);
     run_cost_ += out.cost;
@@ -478,7 +502,52 @@ std::string Agent::recap()
     return clip_recap(out.text);
 }
 
-/* 一圈一个 turn。等的是「有活干」：pending（上一圈没收工）或收件箱非空；都没有就是 idle。
+/* —— 压缩（ADR-0036）—— */
+
+bool Agent::over_threshold() const
+{
+    const long long window = ctx_.pricing ? ctx_.pricing->context(ctx_.config->model(ModelTier::Main)) : 0;
+    return window > 0 && context_used_ * 100 >= window * ctx_.config->get_json("compact_threshold").get<long long>();
+}
+
+std::string Agent::compact(const std::string &trigger, std::string instructions)
+{
+    if (messages_.size() < 2) return "没有可压缩的历史";
+    json hook_in{{"matcher_key", trigger},
+                 {"agent_id", id_},
+                 {"cwd", workdir_},
+                 {"session_id", session_.id()},
+                 {"trigger", trigger},
+                 {"custom_instructions", instructions}};
+    const HookOutcome pre = hooks_.run(HookEvent::PreCompact, hook_in, &abort_);
+    if (pre.deny) return "PreCompact hook 拦下了这次压缩" + (pre.reason.empty() ? "" : "：" + pre.reason);
+    if (!pre.inject.empty()) instructions += (instructions.empty() ? "" : "\n") + pre.inject;
+
+    broadcast("compact_start", json{{"trigger", trigger}});
+    // 历史转成抄本单独发：请求大小有上限，原对话塞不下了（溢出时）也照样发得出去
+    const std::string transcript = run_transcript(messages_, 0, kCompactTranscriptCap);
+    const json d{{"model", ctx_.config->model(ModelTier::Main)},
+                 {"system", compact_system()},
+                 {"messages", json::array({user_msg(compact_prompt(transcript, instructions))})}};
+    LlmOutcome out;
+    const bool ok = llm_call(d, out, /*silent=*/true);
+    run_cost_ += out.cost;
+    if (!ok) return "压缩失败：" + out.error;
+    if (out.text.empty()) return "压缩失败：模型没有写出摘要";
+
+    messages_ = json::array();
+    record(compact_message(out.text));
+    run_begin_ = 0; // 这一趟的 user 原话在摘要第 1 段里，收工判定从摘要读起
+    context_used_ = 0;
+    broadcast("compact", json{{"text", out.text}});
+
+    hook_in.erase("custom_instructions");
+    hook_in["compact_summary"] = out.text;
+    hooks_.run(HookEvent::PostCompact, std::move(hook_in), &abort_); // 只观察
+    return {};
+}
+
+/* 一圈一个 turn。等的是「有活干」：pending（上一圈没收工）、收件箱非空或有压缩请求；都没有就是 idle。
  * 刹车：用户中断、LLM 调用失败、空回答、kMaxStall。不设轮数上限。 */
 void Agent::loop()
 {
@@ -497,16 +566,27 @@ void Agent::loop()
     for (;;)
     {
         if (busy.owns_lock() && !pending) finish_run(busy);
+        std::optional<std::string> compact_req;
         {
             std::unique_lock<std::mutex> lk(mtx_);
-            cv_.wait(lk, [this, &pending] { return closing_ || pending || !inbox_.empty(); });
+            cv_.wait(lk, [this, &pending] { return closing_ || pending || !inbox_.empty() || compact_req_; });
             if (closing_) return;
+            compact_req.swap(compact_req_);
         }
         if (!busy.owns_lock()) start_run(busy);
-        pending = false;
+        const bool resumed = std::exchange(pending, false);
 
-        take_inbox();
+        // 压缩排在收件箱前面：刚来的话原样接在摘要后面，不被压进去
+        if (compact_req || over_threshold())
+        {
+            // 压不成不拦这一圈：自动的漏了还有溢出兜底，手动的说一声就好
+            if (std::string e = compact(compact_req ? "manual" : "auto", compact_req.value_or("")); !e.empty())
+                broadcast("turn_end", json{{"error", std::move(e)}});
+            if (interrupted()) continue;
+        }
+        const size_t taken = take_inbox();
         if (interrupted()) continue;
+        if (!resumed && taken == 0) continue; // 只是来压缩的，或消息全被 hook 拦下：没有要答的
 
         broadcast("turn_start", json::object());
         LlmOutcome out;
@@ -515,6 +595,15 @@ void Agent::loop()
             context_protocol_enabled(*ctx_.config) ? &context_session_ : nullptr;
         if (!llm_call(build_dialog(ModelTier::Main), out, /*silent=*/false, cs))
         {
+            // 上下文超长：压了重跑这一圈。压过只剩摘要还超，compact 说没得压，就是真塞不下
+            if (!abort_.load() && out.overflow)
+            {
+                const std::string e = compact("overflow", {});
+                if (interrupted()) continue;
+                pending = e.empty();
+                if (pending) continue;
+                out.error += "（" + e + "）";
+            }
             if (!abort_.load())
             {
                 fail_turn(out.error.empty() ? "llm_call failed" : out.error);

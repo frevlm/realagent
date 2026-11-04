@@ -24,6 +24,8 @@ const std::map<std::string, HookEvent> kEvents = {
     {"PreToolUse", HookEvent::PreToolUse},
     {"PostToolUse", HookEvent::PostToolUse},
     {"Stop", HookEvent::Stop},
+    {"PreCompact", HookEvent::PreCompact},
+    {"PostCompact", HookEvent::PostCompact},
 };
 
 const char *event_name(HookEvent e)
@@ -125,7 +127,7 @@ HookOutcome Hooks::run(HookEvent e, nlohmann::json payload, const std::atomic<bo
     if (text.size() > kHookPayloadCap)
     {
         payload["truncated"] = true;
-        for (const char *k : {"tool_response", "tool_input", "prompt"}) payload.erase(k);
+        for (const char *k : {"tool_response", "tool_input", "prompt", "compact_summary"}) payload.erase(k);
         text = payload.dump();
     }
 
@@ -166,7 +168,7 @@ HookOutcome Hooks::run(HookEvent e, nlohmann::json payload, const std::atomic<bo
         // deny 一票定；拦不住东西的位置上说 deny，报一条
         if (deny)
         {
-            if (e == HookEvent::PostToolUse || e == HookEvent::Stop)
+            if (e == HookEvent::PostToolUse || e == HookEvent::Stop || e == HookEvent::PostCompact)
                 fprintf(stderr, "[hook] %s %s: 说了 deny，但这个位置拦不住任何东西，忽略\n",
                         h.from.c_str(), event_name(e));
             else

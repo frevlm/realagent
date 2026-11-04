@@ -55,6 +55,9 @@ std::expected<std::vector<std::string>, std::string> endpoint_models(const nlohm
 /* 非 2xx 时的人话错误（能从 body 里捞出 message 就捞）。status 0 = 没拿到响应，返回空串。 */
 std::string http_status_error(long status, const std::string &body);
 
+/* 端点以「上下文超长」拒绝了这次请求（ADR-0036 的溢出兜底）。各家没有统一错误码，认的是报错原文。 */
+bool context_overflow(long status, const std::string &body);
+
 struct HttpRequest {
     std::string method = "POST"; // GET 不带体
     std::string url;
@@ -185,6 +188,9 @@ class Pricing {
 
     /* 同名键点积 / 1M。算不出返回 0。 */
     double cost(const std::string &model, const nlohmann::json &usage) const;
+
+    /* 模型的上下文窗口（token）。表里没有就是 0。 */
+    long long context(const std::string &model) const;
 
     /* [{name, owned_by, context}]，不含单价 */
     const nlohmann::json &models() const { return models_; }

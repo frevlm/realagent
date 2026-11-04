@@ -32,10 +32,12 @@ nlohmann::json sessions_payload(const Agents &pool, const std::string &client,
 /* 模型名 + 模型表里查到的元数据（GET /statusline、statusline 帧）。 */
 nlohmann::json statusline_payload(const CoreContext &ctx);
 
-/* reply 非空：原样回给客户端。否则 post 是展开好的正文，要当一条消息发出去。 */
+/* reply 非空：原样回给客户端。否则 post 要投给这段对话：compact 为假是展开好的正文，
+ * 当一条消息发出去；为真是一次手动压缩，post 是附加指令（ADR-0036）。 */
 struct CommandOutcome {
     std::string reply;
     std::string post;
+    bool compact = false;
 };
 
 /* input 带前导 `/`。agent 是这段对话打开着的那个，没有就空（/plugins 拿它报连接错误）。 */

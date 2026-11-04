@@ -98,7 +98,7 @@ type Frame struct {
 	Root      string `json:"root"`       // 哪段对话
 	SessionID string `json:"session_id"` // 谁说的：不等于 Root 就是它派生出去的子 agent
 
-	Text  string `json:"text"`  // message_start 的正文；tool_output 的一段输出
+	Text  string `json:"text"`  // message_start 的正文；tool_output 的一段输出；compact 的摘要
 	Delta string `json:"delta"` // message_update / thinking_update 的增量
 
 	Name   string `json:"name"`    // 工具名

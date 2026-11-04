@@ -29,6 +29,25 @@ func TestFrameRouting(t *testing.T) {
 	}
 }
 
+// 压缩：读秒说在压，压完摘要成一条；状态栏上压缩前的上下文大小作废
+func TestCompactFrames(t *testing.T) {
+	m := testModel()
+	m.client.Use("s-1")
+	tokens := int64(900)
+	m.sl.live.ContextTokens = &tokens
+	m.handleEvent(at("s-1", "s-1", client.Frame{Event: "compact_start"}))
+	if m.busy.verb != "压缩上下文" {
+		t.Errorf("读秒 = %q", m.busy.verb)
+	}
+	m.handleEvent(at("s-1", "s-1", client.Frame{Event: "compact", Text: "摘要正文"}))
+	if got := dump(m); !reflect.DeepEqual(got, []string{"compact:摘要正文"}) {
+		t.Errorf("条目 = %q", got)
+	}
+	if m.sl.live.ContextTokens != nil {
+		t.Errorf("上下文大小 = %d，应等下一次请求再报", *m.sl.live.ContextTokens)
+	}
+}
+
 // 子 agent 收工不是这段对话收工：读秒照走
 func TestSubAgentEndKeepsBusy(t *testing.T) {
 	m := testModel()

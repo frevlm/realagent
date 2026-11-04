@@ -105,21 +105,24 @@ int main()
         },
         approval);
 
-    /* 一条消息（或展开好的 prompt 命令）发进一段对话。agent 在这里才建出来，
+    /* 一条消息（或展开好的 prompt 命令、一次 /compact）投进一段对话。agent 在这里才建出来，
      * 所以没有从没说过话的 agent（ADR-0029）。 */
-    const auto submit = [&](const json &j, const std::string &text) {
+    const auto submit = [&](const json &j, const std::string &text, bool compact = false) {
         // 每条现算：POST /setup 会在运行中把端点配齐
         if (std::string e = endpoint_config_error(cfg); !e.empty()) return command_error(e);
         std::string err;
         const auto a = pool.open(j.value("client_id", ""), j.value("workdir", ""), j.value("session_id", ""), err);
         if (!a) return command_error(err);
-        a->post(text);
+        if (compact)
+            a->request_compact(text);
+        else
+            a->post(text);
         return std::string(R"({"status":"processing"})");
     };
     const auto command = [&](const json &j, const std::string &input) {
         const auto a = pool.find(j.value("client_id", ""), j.value("session_id", ""));
         const CommandOutcome o = run_command(ctx, j.value("workdir", ""), a.get(), input);
-        return o.reply.empty() ? submit(j, o.post) : o.reply;
+        return o.reply.empty() ? submit(j, o.post, o.compact) : o.reply;
     };
 
     server.route("POST", "/message", [&](const std::string &body) {

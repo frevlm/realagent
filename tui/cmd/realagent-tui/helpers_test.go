@@ -45,7 +45,7 @@ func texts(m model) []string {
 // dump 是对话里每一条的「类别:正文」。工具调用写成「tool:名字:状态」，有输出时再接「|输出」
 func dump(m model) []string {
 	names := map[*kind]string{kindUser: "user", kindAssistant: "assistant", kindThinking: "thinking",
-		kindTool: "tool", kindInfo: "info", kindError: "error"}
+		kindTool: "tool", kindInfo: "info", kindError: "error", kindCompact: "compact"}
 	var out []string
 	for i, text := range texts(m) {
 		it := m.tr.items[i]

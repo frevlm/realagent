@@ -3,6 +3,7 @@
  */
 #include "agent/verdict.hpp"
 
+#include "agent/compact.hpp"
 #include "tools/tools.hpp"
 
 #include <vector>
@@ -32,7 +33,7 @@ struct Line {
 
 } // namespace
 
-std::string run_transcript(const nlohmann::json &messages, size_t from)
+std::string run_transcript(const nlohmann::json &messages, size_t from, size_t cap)
 {
     std::vector<Line> lines;
     if (messages.is_array())
@@ -50,7 +51,11 @@ std::string run_transcript(const nlohmann::json &messages, size_t from)
                 {
                     const std::string text = b.value("text", std::string());
                     const bool mine = text.rfind(kSupervisorTag, 0) == 0;
-                    lines.push_back({!mine, (mine ? "" : "[user] ") + clip(text, kVerdictLineCap)});
+                    // 摘要整条留着：它就是压缩之前的全部意图与现场，截一行就没了
+                    if (is_compact_text(text))
+                        lines.push_back({true, text});
+                    else
+                        lines.push_back({!mine, (mine ? "" : "[user] ") + clip(text, kVerdictLineCap)});
                 }
                 else if (t == "text")
                 {
@@ -80,7 +85,7 @@ std::string run_transcript(const nlohmann::json &messages, size_t from)
 
     // 超预算就从最旧的开始丢，只丢不 pinned 的。丢掉的是过程，留下的是意图与现场
     std::vector<char> dropped(lines.size(), 0);
-    for (size_t i = 0; i < lines.size() && total > kVerdictCap; ++i)
+    for (size_t i = 0; i < lines.size() && total > cap; ++i)
     {
         if (lines[i].pinned) continue;
         dropped[i] = 1;
@@ -102,7 +107,7 @@ std::string run_transcript(const nlohmann::json &messages, size_t from)
         out += '\n';
     }
     // 全是 user 的话仍旧可能超（一趟里塞进几十条长消息）。这时整份再截一刀
-    return clip(std::move(out), kVerdictCap);
+    return clip(std::move(out), cap);
 }
 
 nlohmann::json decision_state(const nlohmann::json &messages, size_t from)

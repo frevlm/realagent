@@ -28,8 +28,9 @@ inline constexpr size_t kRecapCap = 4000;
 /* System One 那次调用的超时：没人看着它，卡住就永远收不了工 */
 inline constexpr long kDecisionTimeoutS = 30;
 
-/* messages[from..] → 抄本。from 是这一趟开跑时的历史长度。 */
-std::string run_transcript(const nlohmann::json &messages, size_t from);
+/* messages[from..] → 抄本，不超过 cap 字节。from 是这一趟开跑时的历史长度。
+ * 摘要消息（ADR-0036）与 user 的话一样钉住不丢，而且整条不截。 */
+std::string run_transcript(const nlohmann::json &messages, size_t from, size_t cap = kVerdictCap);
 
 /* System One 的 state：{user, assistant}。user = 这一趟里 user 的话（messages[from..]，
  * 不含 supervisor 打回的），assistant = 最后一条助手消息的正文；别的一概不给。 */

@@ -22,6 +22,8 @@ enum class HookEvent {
     PreToolUse,       // 执行工具之前
     PostToolUse,      // 工具产出结果之后（被中断不算）
     Stop,             // 收工判定说到头了。只观察
+    PreCompact,       // 压缩之前（ADR-0036）。deny = 这次不压，inject 加进总结指令
+    PostCompact,      // 摘要入账之后。只观察
 };
 
 struct HookOutcome {
@@ -29,7 +31,7 @@ struct HookOutcome {
      * PostToolUse / Stop 上的 deny 拦不住任何东西，报一条后忽略。 */
     bool deny = false;
     std::string reason;
-    std::string inject; // 要加进上下文的文字（SessionStart / UserPromptSubmit）
+    std::string inject; // 要加进上下文的文字（SessionStart / UserPromptSubmit / PreCompact）
 };
 
 class Hooks {

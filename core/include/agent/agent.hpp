@@ -12,6 +12,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -47,8 +48,9 @@ struct LlmOutcome {
     };
     std::vector<ToolUse> tool_uses;
     std::string stop_reason;
-    std::string error; // 非空 = 失败原因（给人看）
-    double cost = 0;   // USD
+    std::string error;     // 非空 = 失败原因（给人看）
+    bool overflow = false; // 端点以「上下文超长」拒绝了这次请求
+    double cost = 0;       // USD
 };
 
 class Agent {
@@ -87,7 +89,11 @@ class Agent {
      * 下一个 turn 开头取走。 */
     void post(std::string message);
 
-    /* 有活：在跑，或收件箱里有还没取走的。 */
+    /* 要一次手动压缩（/compact，ADR-0036）。instructions 加进总结指令，可空。
+     * 与 post 一样投进来就返回：在跑就等下一个 turn 开头，idle 就为它开一趟。 */
+    void request_compact(std::string instructions);
+
+    /* 有活：在跑，或收件箱里有还没取走的消息或压缩请求。 */
     bool running();
 
     /* 任意线程。停住 LLM 流与在跑的工具。 */
@@ -113,13 +119,20 @@ class Agent {
     void start_run(std::unique_lock<std::mutex> &busy);
     void finish_run(std::unique_lock<std::mutex> &busy);
 
-    void take_inbox();
+    /* 返回取到了几条要答的消息（被 UserPromptSubmit 拦下的不算）。 */
+    size_t take_inbox();
     void record_user(const std::string &text);
     void record_assistant(const LlmOutcome &out);
     void run_tools(const LlmOutcome &out);
     /* 消息入账的唯一入口：先落盘再进内存。 */
     void record(nlohmann::json msg);
     void ensure_loaded();
+
+    /* 把历史换成一条摘要（ADR-0036）。trigger 是 manual / auto / overflow。
+     * 返回空串 = 压成了；否则是没压的原因，历史原样不动。 */
+    std::string compact(const std::string &trigger, std::string instructions);
+    /* 上一次主模型调用用到了窗口的 compact_threshold%。模型表里查不到窗口就永远不到。 */
+    bool over_threshold() const;
 
     nlohmann::json build_dialog(ModelTier tier) const;
     /* context 非空时这次调用走增量上下文协议（收工判定那次调用不传：每次判定都是
@@ -151,16 +164,18 @@ class Agent {
     std::string def_body_;
     ContextSession context_session_; // 增量上下文协议的状态（配置开关控制用不用）
 
-    size_t run_begin_ = 0;  // 这一趟开跑时历史的长度：收工判定的抄本从这里取
-    std::string recap_;     // 小模型写的 recap；没配小模型时为空
-    std::string run_error_; // 这一趟停在哪个错误上；正常收工为空
-    int stall_ = 0;         // 连着几次打回后主模型仍一个工具都没调
-    double run_cost_ = 0;   // 这一趟累计花费
+    size_t run_begin_ = 0;       // 这一趟开跑时历史的长度：收工判定的抄本从这里取
+    std::string recap_;          // 小模型写的 recap；没配小模型时为空
+    std::string run_error_;      // 这一趟停在哪个错误上；正常收工为空
+    int stall_ = 0;              // 连着几次打回后主模型仍一个工具都没调
+    double run_cost_ = 0;        // 这一趟累计花费
+    long long context_used_ = 0; // 上一次主模型调用的提示词 + 输出 token：自动压缩看它
     std::atomic<bool> abort_{false};
 
-    std::mutex mtx_; // 护 inbox_ / closing_
+    std::mutex mtx_; // 护 inbox_ / compact_req_ / closing_
     std::condition_variable cv_;
     std::deque<std::string> inbox_;
+    std::optional<std::string> compact_req_; // 手动压缩的请求，值是附加指令
     bool closing_ = false;
     std::atomic<bool> running_{false};
     std::mutex run_mtx_; // 一趟期间持有

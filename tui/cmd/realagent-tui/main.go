@@ -621,6 +621,14 @@ func (m *model) handleEvent(f client.Frame) tea.Cmd {
 			m.emit(kindError, "✗ "+f.Error)
 		}
 
+	case "compact_start":
+		return m.busy.begin("压缩上下文", time.Now())
+
+	case "compact":
+		m.tr.close()
+		m.emit(kindCompact, f.Text)
+		m.sl.live.ContextTokens = nil // 压完只剩摘要，旧的数不作数了；下一次请求再报
+
 	case "agent_end":
 		// 唯一的收工信号
 		m.tr.close()

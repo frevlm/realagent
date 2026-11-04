@@ -4,6 +4,7 @@
 #include "llm/llm.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -154,6 +155,17 @@ std::string http_status_error(long status, const std::string &body)
     }
     if (msg.empty()) msg = body.substr(0, 400);
     return "端点返回 HTTP " + std::to_string(status) + (msg.empty() ? "" : "：" + msg);
+}
+
+bool context_overflow(long status, const std::string &body)
+{
+    if (status != 400 && status != 413) return false;
+    std::string lower(body);
+    for (char &c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Anthropic / OpenAI 的错误码 / OpenAI 与 DeepSeek 等兼容端点 / OpenAI Responses
+    for (const char *s : {"prompt is too long", "context_length_exceeded", "maximum context length", "context window"})
+        if (lower.find(s) != std::string::npos) return true;
+    return false;
 }
 
 /* ==================== 上行派发 ==================== */
@@ -331,6 +343,13 @@ Pricing Pricing::load(const Config &cfg, std::string *error)
             {"name", *name}, {"owned_by", *owned_by}, {"context", *context}});
     }
     return out;
+}
+
+long long Pricing::context(const std::string &model) const
+{
+    for (const nlohmann::json &m : models_)
+        if (m["name"] == model) return m["context"].get<long long>();
+    return 0;
 }
 
 double Pricing::cost(const std::string &model, const nlohmann::json &usage) const

@@ -1,10 +1,12 @@
 #include "agent/session.hpp"
 
+#include "agent/compact.hpp"
 #include "tools/tools.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -211,7 +213,12 @@ nlohmann::json Session::to_frames(const nlohmann::json &messages)
         for (const auto &b : *content)
         {
             const std::string type = str(b, "type");
-            if (type == "text" && role == "user")
+            if (type == "text" && role == "user" && is_compact_text(str(b, "text")))
+            {
+                // 摘要不是谁说的话：回放成与实时同形的 compact 帧（ADR-0036）
+                frame(out, "compact", nlohmann::json{{"text", str(b, "text").substr(std::strlen(kCompactTag))}});
+            }
+            else if (type == "text" && role == "user")
             {
                 // 收件箱三种来源都是 user，发信人写在正文里
                 frame(out, "message_start", nlohmann::json{{"role", "user"}, {"text", str(b, "text")}});

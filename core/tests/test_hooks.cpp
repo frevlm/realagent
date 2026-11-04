@@ -191,14 +191,14 @@ int main()
 
     printf("== 认不出的事件点名说，不静默丢 ==\n");
     clear_all();
-    put_hooks(g_home, "p1", R"({"hooks":{"PreCompact":[{"hooks":[
+    put_hooks(g_home, "p1", R"({"hooks":{"SessionEnd":[{"hooks":[
         {"type":"command","command":"true"}]}]}})");
     {
         const Hooks h = Hooks::scan(g_work.string());
         CHECK(h.empty(), "没有这个落点，一条都不收");
         bool said = false;
         for (const auto &e : h.errors())
-            if (e.find("PreCompact") != std::string::npos) said = true;
+            if (e.find("SessionEnd") != std::string::npos) said = true;
         CHECK(said, "点名说本项目没有这个落点");
     }
 

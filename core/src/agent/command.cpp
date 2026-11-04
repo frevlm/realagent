@@ -81,30 +81,30 @@ std::string ok_json(const char *name, nlohmann::json data)
     return nlohmann::json{{"ok", true}, {"command", name}, {"data", std::move(data)}}.dump();
 }
 
-std::string cmd_model(Env &e, const std::string &arg)
+CommandOutcome cmd_model(Env &e, const std::string &arg)
 {
     if (arg.empty())
     {
         auto list = models_payload(e.ctx);
-        return list ? ok_json("model", std::move(*list)) : command_error(list.error());
+        return {.reply = list ? ok_json("model", std::move(*list)) : command_error(list.error())};
     }
     // 带名 = 切主模型，不查清单（手填）。statusline 帧由事件循环发现变化后推
-    if (!e.ctx.config->persist("model", nlohmann::json(arg))) return command_error("写入 settings.json 失败");
-    return ok_json("model", nlohmann::json::array({{{"name", arg}, {"current", true}}}));
+    if (!e.ctx.config->persist("model", nlohmann::json(arg))) return {.reply = command_error("写入 settings.json 失败")};
+    return {.reply = ok_json("model", nlohmann::json::array({{{"name", arg}, {"current", true}}}))};
 }
 
 /* /effort [level]：看或改主模型的思考量级。取值不查表，原样发给端点（ADR-0035）。
  * default = 写成空串：请求里不带这个字段，由端点用模型自己的默认档 */
-std::string cmd_effort(Env &e, const std::string &arg)
+CommandOutcome cmd_effort(Env &e, const std::string &arg)
 {
     const std::string v = arg == "default" ? "" : arg;
     if (!arg.empty() && !e.ctx.config->persist("effort", nlohmann::json(v)))
-        return command_error("写入 settings.json 失败");
-    return ok_json("effort", nlohmann::json{{"effort", e.ctx.config->get("effort")}});
+        return {.reply = command_error("写入 settings.json 失败")};
+    return {.reply = ok_json("effort", nlohmann::json{{"effort", e.ctx.config->get("effort")}})};
 }
 
 /* /plugins：装了哪些、各带了什么、建 agent 时出了什么问题。只读。 */
-std::string cmd_plugins(Env &e, const std::string &)
+CommandOutcome cmd_plugins(Env &e, const std::string &)
 {
     nlohmann::json arr = nlohmann::json::array();
     for (const PluginInfo &p : plugin_infos(e.workdir))
@@ -126,13 +126,16 @@ std::string cmd_plugins(Env &e, const std::string &)
     nlohmann::json errors = nlohmann::json::array();
     if (e.agent)
         for (const std::string &m : e.agent->plugin_errors()) errors.push_back(m);
-    return ok_json("plugins", nlohmann::json{{"plugins", arr}, {"errors", errors}});
+    return {.reply = ok_json("plugins", nlohmann::json{{"plugins", arr}, {"errors", errors}})};
 }
+
+/* /compact：压缩要动历史，只能在 agent 自己的线程上做，这里只把请求投过去 */
+CommandOutcome cmd_compact(Env &, const std::string &arg) { return {.post = arg, .compact = true}; }
 
 struct CommandDef {
     const char *name; // 不带前导 '/'
     const char *description;
-    std::string (*run)(Env &, const std::string &arg);
+    CommandOutcome (*run)(Env &, const std::string &arg);
 };
 
 /* 全部命令。清单与派发都读这张表，加一条命令就是加一行。 */
@@ -141,6 +144,7 @@ constexpr CommandDef kCommands[] = {
     {"effort", "主模型的思考量级（/effort <none|minimal|low|medium|high|xhigh|max|default>，端点认哪些看端点）", cmd_effort},
     {"plugins", "查看装了哪些 plugin、各带了什么（只读；装 = git clone 进目录，卸 = 删掉）",
      cmd_plugins},
+    {"compact", "把这段对话的历史压成一条摘要（/compact <指令> 告诉它重点留什么）", cmd_compact},
 };
 
 } // namespace
@@ -181,7 +185,7 @@ CommandOutcome run_command(CoreContext &ctx, const std::string &workdir, const A
         if (name == c.name)
         {
             Env env{ctx, workdir, agent};
-            return {.reply = c.run(env, arg)};
+            return c.run(env, arg);
         }
     for (const PromptCommand &c : scan_commands(workdir))
         if (name == c.name) return {.post = expand_arguments(c.body, arg)};

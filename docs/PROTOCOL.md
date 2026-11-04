@@ -37,7 +37,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `POST /group/close` | 关掉调用方那一组，体 `{"client_id"}`。客户端正常退出前显式发一次；**断线满 60 秒 core 自己也会关**，那是兜底不是主路（ADR-0021） | ✅ |
 | `POST /message` | 往一段对话里发一条消息，体 `{"client_id","workdir","session_id","message"}` → `{"status":"processing"}`。**`session_id` 由客户端给，新对话就是一个盘上还没有的 id**：本组打开着就投进去，没打开就建 agent 打开它（盘上有就接着说，没有就是新的）——agent 在这里才建出来，没有从没说过话的 agent（ADR-0029 §2）。id 不许带 `/`。别的组打开着回 `{"ok":false,"error":"这段对话在另一个窗口里开着"}`。首字符为 `/` 时按斜杠命令处理（见下「命令」节） | ✅ |
 | `POST /command` | 执行斜杠命令，体 `{"client_id","workdir","session_id","command":"/model"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为 | ✅ |
-| `GET /commands` | 斜杠命令列表 `[{name, description, argument_hint, kind}]`，体 `{"workdir"}`。`kind` 为 `builtin`（`/model` `/effort` `/plugins`）或 `prompt`（plugin 带来的一段文字，跟着 workdir 走，ADR-0024）。`/new` `/resume` 不在里面：换对话是客户端的事（ADR-0029） | ✅ |
+| `GET /commands` | 斜杠命令列表 `[{name, description, argument_hint, kind}]`，体 `{"workdir"}`。`kind` 为 `builtin`（`/model` `/effort` `/plugins` `/compact`）或 `prompt`（plugin 带来的一段文字，跟着 workdir 走，ADR-0024）。`/new` `/resume` 不在里面：换对话是客户端的事（ADR-0029） | ✅ |
 | `POST /interrupt` | 停下一段对话，体 `{"client_id","session_id"}`，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。**停的是这段对话和它派生出去的全部**（`root` 等于它的那些 agent）——用户眼里那是一件事，Esc 按下去子 agent 还在烧钱就是没停（ADR-0029 §5）。每个被停的 agent 置 abort 位，并把自己挂着的审批按 deny 掐掉；别的对话不受牵连。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——在跑的 bash 收掉它的进程组（`run_proc` 轮询到即 SIGTERM，1 秒不死再 SIGKILL）。read/edit 跑得快，不设中断点 | ✅ |
 | `POST /approval-response` | 审批裁决回传（TUI → core），体 `{"id", "allow"}` | ✅ |
 | `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "effort", "owned_by", "context"}`。effort 没配是空串；后两项来自模型数据表，查不到就没有 | ✅ |
@@ -87,6 +87,8 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `statusline` | 状态栏数据 | 会话身份变了就推一帧（见下），与 `GET /statusline` 同一份载荷 | ✅ |
 | `permission_request` | `{id, tool, params, root, session_id}` | 审批请求（可靠，卡点）。**不按「当前看着哪段对话」过滤**：客户端不管在看哪段都要弹，靠 `root` / `session_id` 说明是子任务还是另一段对话在问。过滤会让一段没人看的对话静默地拿不到任何权限，而用户根本不知道有人问过（ADR-0019 §8）。**那一组没有客户端连着推送流时当场拒绝**，不等那 30 秒 | ✅ |
 | `interrupted` | 空对象 | `POST /interrupt` 生效——agent 在某个检查点停了。此后本次 run 不再有帧 | ✅ |
+| `compact_start` | `{trigger}` | 开始压缩（ADR-0036）。`trigger`：`manual`（`/compact`）/ `auto`（用到 `compact_threshold`）/ `overflow`（端点报上下文超长）。客户端据此显示「压缩上下文」。压不成不另造帧，沿用 `turn_end {error}` | ✅ |
+| `compact` | `{text}` | 压完了，`text` 是摘要。此后模型只看得到这段摘要与之后的消息。`GET /session` 回放时，会话文件里的摘要那条也回放成这一帧 | ✅ |
 | `agent_start` | 空对象 | 一次「跑」开始：agent 从 idle 醒了。与 turn 不是一回事——一次跑里有 N 个 turn | ✅ |
 | `agent_end` | `{cost, recap}` | 一次「跑」收工，**唯一的收工信号**：收工判定说这趟到头了，或出错/被中断——四条路最后都发这一帧。agent 回去等收件箱（空了就是 idle）。**这一帧在自己不再算在跑之后才发**，所以收到它再问 `GET /sessions` 拿到的就是真相（ADR-0031）。`cost` 是本次跑的累计花费（含判定那次调用），`recap` 是这一趟的回顾（没配小模型时为空串，ADR-0025） | ✅ |
 
@@ -179,6 +181,7 @@ builtin 命令直接返回结果 JSON（`{"ok":true,"command":...}`），**不�
 | `/effort` | 看主模型的思考量级 | `{"ok":true,"command":"effort","data":{"effort":"high"}}`，没配是空串 |
 | `/effort <level>` | 改思考量级（写回 settings.json，下次调用即生效）。取值不校验，原样发给端点；`default` = 清空，请求里不带这个字段 | 同上 |
 | `/plugins` | 装了哪些 plugin、各带了什么；这段对话打开着时附上建 agent 时的连接错误 | `{"ok":true,"command":"plugins","data":{plugins,errors}}` |
+| `/compact [指令]` | 把这段对话的历史压成一条摘要（ADR-0036），指令告诉它重点留什么。与消息一样投进对话：在跑就等下一个 turn 开头，idle 就为它开一趟 | `{"status":"processing"}`，结果走 `compact_start` / `compact` 帧 |
 | 失败 | — | `{"ok":false,"command":"...","error":"..."}` |
 
 **纯客户端命令不在此表**：`/new`、`/resume`（换对话——只是下一条消息带哪个 `session_id`，ADR-0029）、`/quit`（退出客户端进程）与 `/statusline`（展示偏好）由客户端就地处理，从不发给 core——core 是常驻服务、还连着别的客户端，它没有"退出"这个概念，也不认展示偏好。它们照常出现在斜杠菜单里，用户分不出、也不需要分。

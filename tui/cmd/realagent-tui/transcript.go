@@ -23,6 +23,7 @@ var (
 	kindThinking  = &kind{style: thinkingStyle, head: func(*item) string { return "💭 思考过程" }}
 	kindTool      = &kind{style: dimStyle, prefix: "   ", head: toolHead}
 	kindInfo      = &kind{style: dimStyle} // 客户端自己的提示、子 agent 的动静
+	kindCompact   = &kind{style: dimStyle, head: func(*item) string { return "📦 上下文已压缩，模型往后只看得到这段摘要" }}
 	kindError     = &kind{style: errorStyle, prefix: "! "}
 )
 

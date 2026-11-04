@@ -47,6 +47,14 @@ _Avoid_: `stop 工具`（已删除）、`裁判模型`/`judge model`（作独立
 
 _Avoid_: `compact`、`压缩`、`总结`（那三个词在本项目里指的是「把历史换成摘要」，recap 不动历史）、`标题`
 
+### **Compact（压缩）**:
+
+把一段对话的历史换成一条摘要（[[ADR-0036]]）。**摘要是一条 user 消息，正文以 `[compact] ` 开头**——与 `[supervisor] ` 同一个做法，靠正文认来源，不往消息里加键。它照常追加进会话文件；读回历史时**从最后一条摘要读起**，之前的行一个字不动，留给回放看（回放成 `compact` 帧）。只留摘要，不留最近一截原文：留了就得在文件里抄第二遍，或者加一个「从哪条开始保留」的指针，两样都破坏「一行就是内存里的一条」。
+
+写摘要的是主模型，读的是**有上限的抄本**（裁法同收工判定那份），所以三种触发——手动（`/compact [指令]`）、自动（上一次主模型调用用到了窗口的 `compact_threshold`%，默认 85，5 为一档）、端点报上下文超长——走同一条路，原对话塞不下了也发得出去。超长时压完重跑这一圈；压过只剩摘要还超，就没得压了，报错收工。摘要第一段逐字抄下用户的每一条请求：一趟中途压缩后，[[收工判定（Stop Verdict）]]从摘要里读「用户要的是什么」。
+
+_Avoid_: `总结`（作名词指这件事时）、`microcompact`（不调模型清掉旧工具结果——没做）
+
 ### **Tool（工具）**:
 
 LLM 可调用的具名函数。带名称、描述、参数 Schema（JSON Schema）、危险标记，执行后返回结构化结果。
@@ -208,7 +216,7 @@ _Avoid_: `命令`单指内置那三条、`宏`、`模板命令`
 
 一个 `run(event, payload)` 返回一个 Outcome（`deny` / `reason` / `inject`），**位置由事件名决定，签名不分家**——写成 `run_pre` / `run_post` 两个函数的话，后者的返回值永远被忽略，那是个骗人的接口。没装 hook 时 `run` 立即返回空 Outcome，零开销（同 skill 清单为空时那条）。
 
-**只在真有落点的地方成对**：工具执行有 `PreToolUse` / `PostToolUse`；`SessionStart`、`UserPromptSubmit`、`Stop` 只有前半。不为对称造名字——`SessionEnd` 在多 agent 里指哪件事答不上来，就别造。
+**只在真有落点的地方成对**：工具执行有 `PreToolUse` / `PostToolUse`，[[Compact（压缩）]]有 `PreCompact` / `PostCompact`；`SessionStart`、`UserPromptSubmit`、`Stop` 只有前半。不为对称造名字——`SessionEnd` 在多 agent 里指哪件事答不上来，就别造。
 
 **`deny` 只能收紧，不能放宽**：hook 说 deny 就 deny，说别的一律当没说过。于是没有优先级表，它退化成权限链上的一个「与」，**一个 hook 永远不能把 `ask` 变成 `allow`**。post 位置收到 `deny` 要报一条，不静默丢。
 
@@ -575,6 +583,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 配置约定：**只有全局 `~/.realagent/`**。~~项目级 `.realagent/settings.json`~~ 已砍（2026-08-28，从未落地）：`core/src/config.cpp` 明写「唯一的覆盖来源，不看 cwd」，而 [[ADR-0019]] 之后 core 连 cwd 这个概念都没有了，项目级配置该按哪个 [[工作目录（Workdir）]]取也答不上来——同一个 core 里 N 个 agent，N 份项目配置合并给谁用？`extensions/` 随 [[ADR-0016]] 作废。真按项目分家的只有会话目录（`<workdir>/.realagent/sessions`）。
 - 上下文压缩：第一版不做。靠最大上下文模型硬撑，会话满则开新会话；后期可加 auto-compact。
   - 实况注（2026-09-09）：[[ADR-0025]] 的 [[Recap（回顾）]]**不是压缩**——它读历史，不回写历史，一趟的历史一个字不动。hook 的 `PreCompact` 仍然不适用。
+  - 实况注（2026-11-04）：压缩做了（[[ADR-0036]]）：手动、到阈值自动、溢出兜底三种触发，`PreCompact` / `PostCompact` 随之有了落点。见 [[Compact（压缩）]]。
 - Steering：第一版只支持中止（abort），不支持中途插话。插话（steering queue）后期基于异步引擎再加。
 - 会话管理：第一版支持新建/恢复/列表，无 fork/树导航。
 - 多 Agent：~~第一版单 agent，预留接口（第二版里程碑）~~ —— **第二版即本轮**（[[ADR-0019]]，2026-08-28）。core 一台机器一个实例（端口即锁，不加 pid 文件）；agent 创建必传 [[工作目录（Workdir）]]；agent 之间~~是边构成的有向图，通信与完成通知走收件箱~~——2026-11-03 改为阻塞的 `spawn` 子 agent（[[ADR-0033]]）；三状态（运行中 / idle / close），idle 丢内存里的对话历史；[[Event]] 全推带 `agent_id`，core 不过滤；图不落盘。

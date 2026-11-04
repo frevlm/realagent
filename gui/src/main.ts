@@ -343,6 +343,14 @@ function render(p: Pane, f: Frame, replay: boolean) {
       S.interrupted = true;
       dropApprovals(S.sessionId);
       break;
+    case "compact_start":
+      endAll(p);
+      if (top) busy("压缩上下文");
+      break;
+    case "compact":
+      endAll(p);
+      add(p, el("div", "recap msg", '<div class="recap-head">上下文已压缩，模型往后只看得到这段摘要</div>')).append(f.data.text ?? "");
+      break;
     case "agent_end": {
       endAll(p);
       if (sub) { subState(sub, "完成"); break; }

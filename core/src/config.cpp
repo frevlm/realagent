@@ -18,7 +18,9 @@ nlohmann::json defaults()
     // 占位符 {url} / {name} / {value}；子数组是每个 header 重复一次的那一组。
     // setup_done：首启引导走完过没有。false 时 TUI 启动先跑引导（GET / POST /setup）。
     // protocol / base_url：默认连 revlm 生产实例（ADR-0030）；model 没有默认。
+    // compact_threshold：上下文用到窗口的百分之几就自动压缩（ADR-0036），5 为一档，100 = 只在溢出时压。
     return {{"permission", "ask"},
+            {"compact_threshold", 85},
             {"setup_done", false},
             {"protocol", "revlm"},
             {"base_url", kRevlmBaseUrl},
@@ -103,6 +105,11 @@ std::expected<Config, std::string> Config::load()
     auto file = read_settings(settings_path(global_dir()));
     if (!file) return std::unexpected(file.error());
     if (*file) merge_into(cfg.settings_, **file);
+
+    // 读不懂就别猜（ADR-0010）：不在档上的阈值不替用户取整
+    if (const nlohmann::json &t = cfg.settings_["compact_threshold"];
+        !t.is_number_integer() || t.get<int>() < 50 || t.get<int>() > 100 || t.get<int>() % 5 != 0)
+        return std::unexpected("compact_threshold 要是 50 到 100 之间 5 的倍数，现在是 " + t.dump());
 
     return cfg;
 }
