@@ -278,10 +278,14 @@ json Agent::build_dialog(ModelTier tier) const
         if (pool_ || t["name"] != "spawn") tools.push_back(t); // 子 agent 不再派生（ADR-0033）
     for (const json &t : mcp_.tools) tools.push_back(t);
     for (auto &t : tools) t.erase("_core");
-    return json{{"model", ctx_.config->model(tier)},
-                {"system", system_prompt()},
-                {"tools", std::move(tools)},
-                {"messages", messages_}};
+    json d{{"model", ctx_.config->model(tier)},
+           {"system", system_prompt()},
+           {"tools", std::move(tools)},
+           {"messages", messages_}};
+    // 思考量级只给主档（ADR-0035）：值原样交给协议层，取值由端点认
+    if (const std::string effort = ctx_.config->get("effort"); tier == ModelTier::Main && !effort.empty())
+        d["effort"] = effort;
+    return d;
 }
 
 void Agent::session_start_hook(const std::string &source)
@@ -374,7 +378,8 @@ void Agent::take_inbox()
 void Agent::record_assistant(const LlmOutcome &out)
 {
     json content = json::array();
-    if (!out.thinking.empty())
+    // 只有签名、正文为空的思考块（display: omitted）也是一块：签名丢了，下一轮回传就少了它
+    if (!out.thinking.empty() || !out.thinking_signature.empty())
     {
         json b{{"type", "thinking"}, {"thinking", out.thinking}};
         if (!out.thinking_signature.empty()) b["signature"] = out.thinking_signature;

@@ -96,6 +96,12 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const 
     body["stream"] = true;
     if (const std::string system = d.value("system", std::string()); !system.empty())
         body["system"] = system;
+    // 新模型的思考正文默认不下发（display: omitted），要 summarized 才画得出 💭
+    if (const std::string effort = d.value("effort", std::string()); !effort.empty())
+    {
+        body["thinking"] = nlohmann::json{{"type", "adaptive"}, {"display", "summarized"}};
+        body["output_config"] = nlohmann::json{{"effort", effort}};
+    }
 
     // messages：抽象对话 → /v1/messages 格式（合并相邻同 role）
     nlohmann::json msgs = nlohmann::json::array();

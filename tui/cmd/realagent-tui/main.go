@@ -6,6 +6,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -232,6 +233,11 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				text = renderModels(v.reply.Data)
 			case "plugins":
 				text = renderPlugins(v.reply.Data)
+			case "effort":
+				var e struct{ Effort string }
+				if json.Unmarshal(v.reply.Data, &e) == nil {
+					text = "思考量级: " + cmp.Or(e.Effort, "端点默认")
+				}
 			}
 			m.emit(kindInfo, text)
 		}
@@ -563,7 +569,7 @@ func (m *model) handleEvent(f client.Frame) tea.Cmd {
 
 	case "statusline":
 		// 与 GET /statusline 同一份载荷，覆盖写
-		m.sl.model, m.sl.window = f.Model, f.Context
+		m.sl.model, m.sl.effort, m.sl.window = f.Model, f.Effort, f.Context
 
 	case "status_update":
 		// 本次 run 累计的绝对值，覆盖写。算不出钱时帧里不带 cost，解出来的 0 就是"没数据"，不覆盖

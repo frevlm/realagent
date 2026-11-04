@@ -23,6 +23,9 @@ HttpRequest build_request(protocol::OpenAiResponses, const Config &cfg, const nl
     body["stream"] = true;
     if (const std::string system = d.value("system", std::string()); !system.empty())
         body["instructions"] = system;
+    // 不要 summary 就收不到 reasoning_summary_text.delta，💭 画不出来
+    if (const std::string effort = d.value("effort", std::string()); !effort.empty())
+        body["reasoning"] = nlohmann::json{{"effort", effort}, {"summary", "auto"}};
 
     nlohmann::json input = nlohmann::json::array();
     if (d.contains("messages") && d["messages"].is_array())

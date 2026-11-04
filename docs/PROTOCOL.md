@@ -37,10 +37,10 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 | `POST /group/close` | 关掉调用方那一组，体 `{"client_id"}`。客户端正常退出前显式发一次；**断线满 60 秒 core 自己也会关**，那是兜底不是主路（ADR-0021） | ✅ |
 | `POST /message` | 往一段对话里发一条消息，体 `{"client_id","workdir","session_id","message"}` → `{"status":"processing"}`。**`session_id` 由客户端给，新对话就是一个盘上还没有的 id**：本组打开着就投进去，没打开就建 agent 打开它（盘上有就接着说，没有就是新的）——agent 在这里才建出来，没有从没说过话的 agent（ADR-0029 §2）。id 不许带 `/`。别的组打开着回 `{"ok":false,"error":"这段对话在另一个窗口里开着"}`。首字符为 `/` 时按斜杠命令处理（见下「命令」节） | ✅ |
 | `POST /command` | 执行斜杠命令，体 `{"client_id","workdir","session_id","command":"/model"}`（命令名带不带 `/` 都认）。与 `POST /message` 的 `/` 前缀分支**共用 core 侧同一份实现**——两个门，一套行为 | ✅ |
-| `GET /commands` | 斜杠命令列表 `[{name, description, argument_hint, kind}]`，体 `{"workdir"}`。`kind` 为 `builtin`（`/model` `/plugins`）或 `prompt`（plugin 带来的一段文字，跟着 workdir 走，ADR-0024）。`/new` `/resume` 不在里面：换对话是客户端的事（ADR-0029） | ✅ |
+| `GET /commands` | 斜杠命令列表 `[{name, description, argument_hint, kind}]`，体 `{"workdir"}`。`kind` 为 `builtin`（`/model` `/effort` `/plugins`）或 `prompt`（plugin 带来的一段文字，跟着 workdir 走，ADR-0024）。`/new` `/resume` 不在里面：换对话是客户端的事（ADR-0029） | ✅ |
 | `POST /interrupt` | 停下一段对话，体 `{"client_id","session_id"}`，恒返回 `{"status":"ok"}`（不报告当时有没有 run 在跑）。**停的是这段对话和它派生出去的全部**（`root` 等于它的那些 agent）——用户眼里那是一件事，Esc 按下去子 agent 还在烧钱就是没停（ADR-0029 §5）。每个被停的 agent 置 abort 位，并把自己挂着的审批按 deny 掐掉；别的对话不受牵连。**中止是异步的**：这个 200 只表示信号已置，agent 在下一个检查点才真正停，客户端要等 `interrupted` 帧才算收工。打断范围：LLM 请求、turn 间隙、**以及正在执行的工具**——在跑的 bash 收掉它的进程组（`run_proc` 轮询到即 SIGTERM，1 秒不死再 SIGKILL）。read/edit 跑得快，不设中断点 | ✅ |
 | `POST /approval-response` | 审批裁决回传（TUI → core），体 `{"id", "allow"}` | ✅ |
-| `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "owned_by", "context"}`，后两项来自模型数据表，查不到就只有 model | ✅ |
+| `GET /statusline` | 状态栏数据（输入框下方那条）：`{"model", "effort", "owned_by", "context"}`。effort 没配是空串；后两项来自模型数据表，查不到就没有 | ✅ |
 | `GET /setup` | 整棵配置树（同 settings.json 合并默认值后的样子，含 `api_key`），引导页拿它预填。TUI 启动时看 `setup_done` 是不是 `true`，不是就先跑引导 | ✅ |
 | `POST /setup` | 引导落盘，体 `{"protocol","base_url","api_key","model","small_model"}` → `{"ok":true}`。只写这五项、收到什么写什么，逐键走 `Config::persist`（内存同步改，不用重启 core），最后写 `setup_done: true` | ✅ |
 | `POST /setup/models` | 引导的模型页拉清单，体 `{"protocol","base_url","api_key"}` → `{"ok":true,"data":["模型 id",...]}`（按名排序）。core 去问端点：anthropic-messages 是 `<base_url>/v1/models`，openai-* 是 `<base_url>/models`。拉不到（HTTP 非 2xx、连不上、10 秒超时）→ `{"ok":false,"error"}`，客户端退回手动输入 | ✅ |
@@ -93,7 +93,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 ### statusline 帧
 
 ```json
-{"model": "deepseek-v4", "owned_by": "deepseek", "context": 131072}
+{"model": "deepseek-v4", "effort": "high", "owned_by": "deepseek", "context": 131072}
 ```
 
 `GET /statusline` 的载荷原样推送：客户端启动时 GET 一次拿初值，之后只等这个帧。
@@ -176,6 +176,8 @@ builtin 命令直接返回结果 JSON（`{"ok":true,"command":...}`），**不�
 |---|---|---|
 | `/model` | 查看模型数据表里的清单 | `{"ok":true,"command":"model","data":[{name,owned_by,context,current}]}` |
 | `/model <name>` | 切换主模型（写回 settings.json，下次调用即生效） | 同上（`data` 为更新后清单）；模型不在表里 → `{"ok":false,"error":"unknown model: ..."}` |
+| `/effort` | 看主模型的思考量级 | `{"ok":true,"command":"effort","data":{"effort":"high"}}`，没配是空串 |
+| `/effort <level>` | 改思考量级（写回 settings.json，下次调用即生效）。取值不校验，原样发给端点；`default` = 清空，请求里不带这个字段 | 同上 |
 | `/plugins` | 装了哪些 plugin、各带了什么；这段对话打开着时附上建 agent 时的连接错误 | `{"ok":true,"command":"plugins","data":{plugins,errors}}` |
 | 失败 | — | `{"ok":false,"command":"...","error":"..."}` |
 

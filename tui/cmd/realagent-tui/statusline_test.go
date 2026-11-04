@@ -181,9 +181,13 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs
 // core 推来的 statusline 帧覆盖模型名与上下文窗口：/model 切档走这一条路
 func TestStatuslineEventUpdatesModel(t *testing.T) {
 	m := testModel()
-	feed(&m, client.Frame{Event: "statusline", Model: "deepseek-v4", Context: 131072})
+	feed(&m, client.Frame{Event: "statusline", Model: "deepseek-v4", Effort: "high", Context: 131072})
 	if m.sl.model != "deepseek-v4" || m.sl.window != 131072 {
 		t.Errorf("statusline 帧后 model/window = %q/%d", m.sl.model, m.sl.window)
+	}
+	// /effort 切档同走这一帧，模型段第二格就是它
+	if got := readModel(m.sl).text[0]; got != "deepseek-v4 · high" {
+		t.Errorf("模型段 = %q, want %q", got, "deepseek-v4 · high")
 	}
 	if len(m.tr.items) != 0 {
 		t.Errorf("statusline 帧不该往对话里写条目，got %v", dump(m))

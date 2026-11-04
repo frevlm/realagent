@@ -41,6 +41,8 @@ HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohman
     body["stream"] = true;
     // 不问就不给：本协议默认的流不带 usage，计价拿不到数
     body["stream_options"] = nlohmann::json{{"include_usage", true}};
+    if (const std::string effort = d.value("effort", std::string()); !effort.empty())
+        body["reasoning_effort"] = effort;
 
     nlohmann::json msgs = nlohmann::json::array();
     if (const std::string system = d.value("system", std::string()); !system.empty())

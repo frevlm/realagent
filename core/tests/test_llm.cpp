@@ -257,6 +257,24 @@ static void test_build_request_openai_chat()
           "工具套一层 function");
 }
 
+/* —— 思考量级：同一个值，三套协议各放各的位置（ADR-0035） —— */
+static void test_build_request_effort()
+{
+    printf("[build_request effort]\n");
+    const json dialog{{"model", "m"}, {"effort", "high"}, {"messages", json::array()}};
+    const auto body_of = [&](const char *proto) {
+        const Config cfg = make_config("http://x/v1", "k", "", proto);
+        return json::parse(build_request(*protocol_from(proto), cfg, dialog).body);
+    };
+    const json a = body_of("anthropic-messages");
+    CHECK(a["output_config"] == json({{"effort", "high"}}) &&
+              a["thinking"] == json({{"type", "adaptive"}, {"display", "summarized"}}),
+          "anthropic-messages：output_config.effort，自适应思考并要回摘要");
+    CHECK(body_of("openai-chat")["reasoning_effort"] == "high", "openai-chat：顶层 reasoning_effort");
+    CHECK(body_of("openai-responses")["reasoning"] == json({{"effort", "high"}, {"summary", "auto"}}),
+          "openai-responses：reasoning.effort，并要 summary");
+}
+
 /* —— openai-responses 的请求形状 —— */
 static void test_build_request_openai_responses()
 {
@@ -753,6 +771,7 @@ int main()
     test_tool_result_blocks();
     test_build_request_openai_chat();
     test_build_request_openai_responses();
+    test_build_request_effort();
     test_endpoint_config_error();
     test_http_status_error();
     test_parse_text();

@@ -6,7 +6,7 @@
 //
 // 每段有 full / compact / minimal 三档写法。一行放不下先在段与段之间折行，
 // 一段自己就超宽再按优先级逐段降档，降过 minimal 就不画。
-// 没数据的值填 "--"，段照画。effort、配额、缓存倒计时、版本 realagent 没有数据源，恒为 "--"。
+// 没数据的值填 "--"，段照画。配额、缓存倒计时、版本 realagent 没有数据源，恒为 "--"。
 // 配色是 ccline 的 terminal 调色板（ANSI 16 色，跟着终端主题走）。
 //
 // 显示哪些段、字形用哪一档由 /statusline 命令配置（本文件末尾），纯客户端状态，进程重启即复原。
@@ -61,7 +61,8 @@ func (l *liveStats) merge(f client.Live) {
 
 type statusline struct {
 	model   string
-	window  int64 // 模型上下文窗口（GET /statusline 的 context）；0 = 不知道
+	effort  string // 主模型的思考量级；没配为空
+	window  int64  // 模型上下文窗口（GET /statusline 的 context）；0 = 不知道
 	cwd     string
 	git     *gitInfo
 	session string // 当前对话的标题：第一条 user 消息
@@ -109,7 +110,7 @@ func (sl *statusline) noteUserMessage(text string) {
 func fetchStatusCmd(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
 		s, _ := c.FetchStatusline()
-		return eventMsg{Event: "statusline", Model: s.Model, Context: s.Context}
+		return eventMsg{Event: "statusline", Model: s.Model, Effort: s.Effort, Context: s.Context}
 	}
 }
 
@@ -233,7 +234,7 @@ func same(s string) reading { return reading{text: [3]string{s, s, s}} }
 
 func readModel(sl statusline) reading {
 	family, _, _ := strings.Cut(strings.TrimSpace(sl.model), " ")
-	name := or(sl.model) + " · " + none // effort 恒为 --
+	name := or(sl.model) + " · " + or(sl.effort)
 	return reading{text: [3]string{name, name, or(family)}}
 }
 

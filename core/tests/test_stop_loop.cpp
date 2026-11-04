@@ -61,7 +61,8 @@ static bool has(const std::string &hay, const std::string &needle)
 
 /* —— 假端点：一个线程、一个监听套接字、按路径与模型名挑回答 ——
  *
- * 聊天只说 openai-chat 一套：这里验的是 loop 的出口，不是协议解析（那是 test_llm 的活）。 */
+ * 聊天说 openai-chat；m-claude 说 anthropic-messages，回一个只有签名的思考块（看它落不落盘）。
+ * 这里验的是 loop 的出口，不是协议解析（那是 test_llm 的活）。 */
 class FakeEndpoint {
   public:
     FakeEndpoint()
@@ -111,7 +112,31 @@ class FakeEndpoint {
         return last_decision_;
     }
 
+    /* m-claude 最近一次请求的体 */
+    std::string last_claude_request() const
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return last_claude_;
+    }
+
   private:
+    /* anthropic-messages 的一次回答：思考块正文为空、只有块尾签名（新模型默认 display: omitted），再一段正文 */
+    static inline const std::string kOmittedThinking =
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n"
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
+        "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"signature_delta\",\"signature\":\"SIG_OMITTED\"}}\n\n"
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,"
+        "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"CLAUDE_ANSWER\"}}\n\n"
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},"
+        "\"usage\":{\"output_tokens\":3}}\n\n"
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
     static std::string sse(const std::string &text)
     {
         nlohmann::json d{{"choices", nlohmann::json::array({{{"delta", {{"content", text}}}}})}};
@@ -145,7 +170,14 @@ class FakeEndpoint {
         {
             nlohmann::json data = nlohmann::json::array();
             for (const char *id : {"m-main", "m-small", "m-decide"}) data.push_back({{"id", id}, {"protocol", "chat_completions"}});
+            data.push_back({{"id", "m-claude"}, {"protocol", "messages"}});
             return json_reply({{"data", data}});
+        }
+        if (has(req, "m-claude"))
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            last_claude_ = req.substr(req.find("\r\n\r\n") + 4);
+            return "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + kOmittedThinking;
         }
         if (has(line, "/systemone"))
         {
@@ -205,7 +237,7 @@ class FakeEndpoint {
     std::vector<double> decision_;
     std::atomic<int> main_n_{0}, small_n_{0}, decision_n_{0};
     mutable std::mutex mtx_;
-    std::string last_decision_;
+    std::string last_decision_, last_claude_;
 };
 
 /* 收到的事件帧。agent 线程往里写，主线程读——一把锁就够 */
@@ -409,6 +441,33 @@ int main()
         CHECK(wait_end(f), "收工了");
         CHECK(ep.decision_calls() == decision_before, "System One 一次没问");
         CHECK(ep.small_calls() - small_before == 1 && has(f.last("agent_end"), "RECAP_PLAIN"), "小模型照写 recap");
+    }
+
+    printf("== 配了 effort 的 messages 渠道：量级进主模型请求，只有签名的思考块照样落盘 ==\n");
+    {
+        nlohmann::json s = revlm;
+        s["model"] = "m-claude";
+        s["effort"] = "high";
+        s.erase("decision_model");
+        s.erase("small_model");
+        auto c4 = reload(home, s);
+        if (!c4) return 1;
+
+        Frames f;
+        CoreContext ctx{.config = &*c4,
+                        .pricing = nullptr,
+                        .emit_fn = [&f](const std::string &t, const std::string &p) { f.add(t, p); }};
+        ApprovalCoordinator approval;
+        Agent a(ctx, approval, home.string(), 5);
+        a.post("想一想再答");
+        CHECK(wait_end(f), "收工了");
+
+        nlohmann::json sent = nlohmann::json::parse(ep.last_claude_request(), nullptr, false);
+        CHECK(sent.is_object() && sent["output_config"]["effort"] == "high", "主模型请求带 output_config.effort");
+
+        nlohmann::json h = history(a);
+        const nlohmann::json want{{"type", "thinking"}, {"thinking", ""}, {"signature", "SIG_OMITTED"}};
+        CHECK(h.size() == 2 && h[1]["content"][0] == want, "助手消息的第一块是那个思考块，签名在");
     }
 
     printf(failures ? "\nFAILED (%d)\n" : "\nALL PASS\n", failures);

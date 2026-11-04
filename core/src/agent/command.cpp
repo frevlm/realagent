@@ -55,6 +55,7 @@ nlohmann::json statusline_payload(const CoreContext &ctx)
     const std::string name = ctx.config->model(ModelTier::Main);
     nlohmann::json out;
     out["model"] = name;
+    out["effort"] = ctx.config->get("effort");
     for (const nlohmann::json &m : ctx.pricing->models())
     {
         if (m["name"] != name) continue;
@@ -92,6 +93,16 @@ std::string cmd_model(Env &e, const std::string &arg)
     return ok_json("model", nlohmann::json::array({{{"name", arg}, {"current", true}}}));
 }
 
+/* /effort [level]：看或改主模型的思考量级。取值不查表，原样发给端点（ADR-0035）。
+ * default = 写成空串：请求里不带这个字段，由端点用模型自己的默认档 */
+std::string cmd_effort(Env &e, const std::string &arg)
+{
+    const std::string v = arg == "default" ? "" : arg;
+    if (!arg.empty() && !e.ctx.config->persist("effort", nlohmann::json(v)))
+        return command_error("写入 settings.json 失败");
+    return ok_json("effort", nlohmann::json{{"effort", e.ctx.config->get("effort")}});
+}
+
 /* /plugins：装了哪些、各带了什么、建 agent 时出了什么问题。只读。 */
 std::string cmd_plugins(Env &e, const std::string &)
 {
@@ -127,6 +138,7 @@ struct CommandDef {
 /* 全部命令。清单与派发都读这张表，加一条命令就是加一行。 */
 constexpr CommandDef kCommands[] = {
     {"model", "从端点拉模型清单（/model <name> 直接切换主模型）", cmd_model},
+    {"effort", "主模型的思考量级（/effort <none|minimal|low|medium|high|xhigh|max|default>，端点认哪些看端点）", cmd_effort},
     {"plugins", "查看装了哪些 plugin、各带了什么（只读；装 = git clone 进目录，卸 = 删掉）",
      cmd_plugins},
 };

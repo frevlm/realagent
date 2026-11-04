@@ -109,9 +109,10 @@ type Frame struct {
 	Tool   string          `json:"tool"`   // permission_request 要用的工具
 	Params json.RawMessage `json:"params"` // permission_request 的工具参数，原样展示
 
-	Error string  `json:"error"` // turn_end：core 报的失败
-	Cost  float64 `json:"cost"`  // status_update / agent_end：本次跑的累计花费，算不出钱时不带
-	Model string  `json:"model"` // statusline
+	Error  string  `json:"error"`  // turn_end：core 报的失败
+	Cost   float64 `json:"cost"`   // status_update / agent_end：本次跑的累计花费，算不出钱时不带
+	Model  string  `json:"model"`  // statusline
+	Effort string  `json:"effort"` // statusline：主模型的思考量级，没配为空
 
 	Context int64 `json:"context"` // statusline：模型的上下文窗口，模型表里查不到时为 0
 	Live          // status_update 里喂状态栏的那几个键
@@ -231,6 +232,7 @@ type SessionInfo struct {
 // Statusline 是 GET /statusline。配了模型表外的模型时 OwnedBy / Context 为空。
 type Statusline struct {
 	Model   string `json:"model"`
+	Effort  string `json:"effort"`
 	OwnedBy string `json:"owned_by"`
 	Context int64  `json:"context"`
 }
