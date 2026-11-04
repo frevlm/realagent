@@ -567,7 +567,7 @@ static void test_parse_openai_chat()
     if (!c.usages.empty())
     {
         const json u = c.usages.back();
-        CHECK(u["input"] == 120, "prompt_tokens → input");
+        CHECK(u["input"] == 20, "input = prompt_tokens − cached_tokens（四项互不重叠）");
         CHECK(u["output"] == 8, "completion_tokens → output");
         CHECK(u["cache_read"] == 100,
               "prompt_tokens_details.cached_tokens → cache_read");
@@ -645,7 +645,7 @@ static void test_parse_openai_responses()
     if (!c.usages.empty())
     {
         const json u = c.usages.back();
-        CHECK(u["input"] == 70, "input_tokens → input");
+        CHECK(u["input"] == 50, "input = input_tokens − cached_tokens（四项互不重叠）");
         CHECK(u["cache_read"] == 20,
               "input_tokens_details.cached_tokens → cache_read");
     }

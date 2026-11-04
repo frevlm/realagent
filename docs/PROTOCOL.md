@@ -101,7 +101,7 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 - **变了才推**：core 每处理完一条请求比对一次当前载荷，不同才发一帧，相同不发（配置只在请求里改）。
 - **谁改的不重要**：载荷本身就是信号。改配置的代码路径不需要通知任何人，客户端也不需要知道是谁改的。
 - **不做配置文件热重载**（ADR-0010）：core 启动时读一次 `settings.json`，之后不再看它。用户手改配置需重启 core 才生效，改模型的唯一在线途径是 `/model <name>`。
-- **当前客户端只消费 `model`**：TUI 的 `client.Statusline` 三个键都解析（tui/internal/client/client.go 的 `Statusline`），但传给渲染的 `statusMsg` 只带 `model`（tui/cmd/realagent-tui/statusline.go 的 `statusMsg`），推送帧也只取 `model`；状态栏另两段 dir 与 git 是 TUI 本地算的，不来自本帧。`owned_by` / `context` 因此目前无人渲染。协议保留这两个键——载荷形状是 core 侧的事实，客户端渲染多少是客户端的事。
+- **TUI 消费 `model` 与 `context`**：`context` 是上下文段进度条的分母，为 0（模型表里查不到）时百分比填 `--`、进度条全空，token 数照画。`owned_by` 目前无人渲染——载荷形状是 core 侧的事实，客户端渲染多少是客户端的事。dir 与 git 是 TUI 本地算的，不来自本帧。
 
 ### tool_output 帧
 
@@ -119,14 +119,24 @@ gui 的 Wails 页面源（`wails://wails`、`http://wails.localhost`，开发时
 ### status_update 帧
 
 ```json
-{"cost": 0.0123}
+{"cost": 0.0123, "context_tokens": 48213, "cache_hit": 0.91}
+{"ttft_ms": 812, "tps": 74.2}
 ```
 
-状态行（读秒行）的数据源。**开放键集**：core 除 `cost` 外一律不解释、原样转发，客户端渲染认识的键、忽略其余。将来加"已用上下文"一类数字，零协议改动。
+运行态数字。**开放键集**：core 除 `cost` 外一律不解释、原样转发，客户端渲染认识的键、忽略其余。**每帧只带这一刻有的键**，客户端缺键保留旧值。
+
+| 键 | 何时发 | 含义 | 落点 |
+|---|---|---|---|
+| `cost` | 每个 usage 事件，算得出钱时 | 本次 run 累计花费（见下） | 状态行 |
+| `context_tokens` | 主模型每个 usage 事件 | 这次请求的提示词 token 数（input + cache_read + cache_write） | 状态栏上下文段 |
+| `cache_hit` | 同上，端点报了缓存读写时 | 提示词里从缓存读的比例，0..1 | 状态栏缓存段 |
+| `ttft_ms` / `tps` | 主模型每次调用成功后 | 发出请求到第一个内容事件的毫秒数；输出 token ÷（流结束 − 第一个内容事件）秒 | 状态栏 timing 段 |
+
+收工判定那次调用只报 `cost`：状态栏描述的是主模型。`tps` 量的是到达 core 的速度——端点或代理整段缓冲再吐时，它会远高于真实出字速度。
 
 - **本次 run 累计**：一次用户输入触发的全部 turn 之和，`POST /message` 起算清零。多 turn 会重发完整历史，花费因此逐轮膨胀——这是真实计费口径，core 不做修正。
 - **绝对值，非增量**：客户端覆盖写即可，不累加。丢帧不产生永久偏差。
-- **钱在 core 里算**（ADR-0009）：SSE 解析出的 token 用量按本次模型查模型数据表换成金额。**token 不跨客户端边界**——客户端收到的只有钱，单价表它一眼都没见过。
+- **钱在 core 里算**（ADR-0009）：SSE 解析出的 token 用量按本次模型查模型数据表换成金额。**计费口径的 token 不跨客户端边界**——客户端收到的是钱，单价表它一眼都没见过。`context_tokens` 是提示词的大小，不是账单，它过边界只为画上下文进度条。
 - 算不出钱（表里没这个模型、端点不报用量）就不发 `cost`，客户端按"无数据"处理，不显示 $0。
 - 每轮至少两帧（`message_start` 后一帧、`message_delta` 后一帧），后者**先于** `stop` 送出，保证客户端收工时数字已定。
 

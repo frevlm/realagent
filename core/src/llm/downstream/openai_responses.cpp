@@ -12,6 +12,7 @@
  *   4. 失败是一个显式的帧（response.failed / error），不是 HTTP 状态——
  *      它必须让本次调用失败，不能当成"没内容"
  */
+#include <algorithm>
 #include <cstdio>
 #include <exception>
 
@@ -108,6 +109,7 @@ bool feed_block(protocol::OpenAiResponses, OpenAiResponsesState &st, std::string
                         if (const long long n = json_int(*d, "cached_tokens"); n > 0)
                             st.usage.cache_read = n;
                     }
+                    st.usage.input -= std::min(st.usage.input, st.usage.cache_read); // input_tokens 含命中缓存的那部分
                     emit_usage(st.usage, sink);
                 }
             }

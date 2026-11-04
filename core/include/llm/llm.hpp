@@ -82,6 +82,7 @@ using EventSink = std::function<void(std::string_view type, const nlohmann::json
 
 /* —— 下行：每个协议一份解析状态，一次调用一份 —— */
 
+/* 四项互不重叠：input 只算没命中缓存的那部分（Anthropic 口径），一次请求的提示词 = 前三项之和。 */
 struct UsageCounts {
     long long input = 0;
     long long output = 0;

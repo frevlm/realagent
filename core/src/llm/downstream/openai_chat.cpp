@@ -12,6 +12,7 @@
  *   5. 思考内容叫 reasoning_content（DeepSeek）或 reasoning，没有 signature，
  *      也没有"块结束"帧——thinking_stop 由本文件在正文开始或收工时补
  */
+#include <algorithm>
 #include <cstdio>
 #include <exception>
 
@@ -86,6 +87,7 @@ bool feed_block(protocol::OpenAiChat, OpenAiChatState &st, std::string_view bloc
                 if (const long long n = json_int(*pd, "cached_tokens"); n > 0)
                     st.usage.cache_read = n;
             }
+            st.usage.input -= std::min(st.usage.input, st.usage.cache_read); // prompt_tokens 含命中缓存的那部分
             emit_usage(st.usage, sink);
         }
 

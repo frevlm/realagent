@@ -4,6 +4,7 @@
 #include "llm/transport.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 
 namespace realagent {
@@ -132,6 +133,32 @@ void Agent::broadcast(const std::string &type, const json &payload)
 
 /* —— LLM 调用 —— */
 
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+/* 一次请求的提示词多大、其中多少是从缓存读的：状态栏的上下文段与缓存段 */
+json prompt_readout(const json &u)
+{
+    const long long read = u.value("cache_read", 0LL), write = u.value("cache_write", 0LL);
+    const long long prompt = u.value("input", 0LL) + read + write;
+    json out = json::object();
+    if (prompt > 0) out["context_tokens"] = prompt;
+    if (read + write > 0) out["cache_hit"] = double(read) / double(prompt);
+    return out;
+}
+
+/* 首 token 时延与出字速度：状态栏的 timing 段。sent = 发出请求，first = 第一个内容事件，done = 流结束 */
+json timing_readout(Clock::time_point sent, Clock::time_point first, Clock::time_point done, long long output)
+{
+    json t{{"ttft_ms", std::chrono::duration_cast<std::chrono::milliseconds>(first - sent).count()}};
+    if (const double gen = std::chrono::duration<double>(done - first).count(); output > 0 && gen > 0)
+        t["tps"] = double(output) / gen;
+    return t;
+}
+
+} // namespace
+
 void Agent::on_llm_event(std::string_view type, const json &ev, LlmOutcome &out,
                          const std::string &model, bool silent)
 {
@@ -154,11 +181,14 @@ void Agent::on_llm_event(std::string_view type, const json &ev, LlmOutcome &out,
         out.stop_reason = ev["reason"];
     else if (type == "usage")
     {
-        // usage 不上传，换成钱再报；算不出就不报
-        const double cost = ctx_.pricing ? ctx_.pricing->cost(model, ev) : 0;
-        if (cost <= 0) return;
-        out.cost = cost;
-        broadcast("status_update", json{{"cost", run_cost_ + cost}});
+        // usage 不原样上传：换成钱报（算不出就不报），主模型这次的提示词大小与缓存命中报给状态栏
+        json st = silent ? json::object() : prompt_readout(ev);
+        if (const double cost = ctx_.pricing ? ctx_.pricing->cost(model, ev) : 0; cost > 0)
+        {
+            out.cost = cost;
+            st["cost"] = run_cost_ + cost;
+        }
+        if (!st.empty()) broadcast("status_update", st);
         return;
     }
     if (!silent && type != "tool_use" && type != "stop") broadcast(std::string(type), ev);
@@ -196,9 +226,17 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSe
     for (;;)
     {
         SseParser parser(*proto);
-        const SendResult r = send(req, [&](std::string_view chunk) { return parser.feed(chunk, [&](std::string_view t, const json &ev) {
-                                                                         on_llm_event(t, ev, out, model, silent);
-                                                                     }); }, abort_);
+        const Clock::time_point sent = Clock::now();
+        Clock::time_point first{}; // 第一个非 usage 事件到达的时刻（首 token）
+        long long output = 0;      // 输出 token，取最后一次 usage
+        const auto on_event = [&](std::string_view t, const json &ev) {
+            if (t == "usage")
+                output = ev.value("output", 0LL);
+            else if (first == Clock::time_point{})
+                first = Clock::now();
+            on_llm_event(t, ev, out, model, silent);
+        };
+        const SendResult r = send(req, [&](std::string_view chunk) { return parser.feed(chunk, on_event); }, abort_);
 
         // 409 revlm_base_miss / revlm_expect_mismatch：上游还没被调、不计费，立即重发完整请求
         if (cs && !resent && ContextSession::is_conflict(r.status, r.error_body))
@@ -213,6 +251,9 @@ bool Agent::llm_call(const json &dialog, LlmOutcome &out, bool silent, ContextSe
         if (r.sink_failed) return fail("解析响应失败（见 core 日志）");
         if (!r.error.empty()) return fail(r.error);
         if (cs) cs->on_response(r.revlm_stored);
+        // 判定那次不量：状态栏只看主模型
+        if (!silent && first != Clock::time_point{})
+            broadcast("status_update", timing_readout(sent, first, Clock::now(), output));
         return true;
     }
 }
