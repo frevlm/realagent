@@ -85,6 +85,7 @@ func (p *panel) markIndex() int {
 // 确认出来的（启停类操作改完接着操作，面板不该自己跑掉）。
 //
 //	/model      列清单 → 开面板选；/model <name> 是明确指令，选完即走
+//	/config     无参开键面板，带键开取值面板；带值是明确指令
 //	/statusline 纯本地，列表与切换回的是同一份清单 → 面板里连续操作不用重打命令
 func panelWantOf(input string, fromPanel bool) string {
 	cmd, args := splitCommand(input)
@@ -96,6 +97,13 @@ func panelWantOf(input string, fromPanel bool) string {
 	case "/statusline":
 		if args == "" || fromPanel {
 			return "statusline"
+		}
+	case "/config":
+		switch {
+		case args == "":
+			return "config"
+		case !strings.ContainsAny(args, " \t\n"):
+			return "config-key"
 		}
 	}
 	return ""

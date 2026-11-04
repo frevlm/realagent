@@ -103,6 +103,38 @@ CommandOutcome cmd_effort(Env &e, const std::string &arg)
     return {.reply = ok_json("effort", nlohmann::json{{"effort", e.ctx.config->get("effort")}})};
 }
 
+/* 一个可调键的当前状态：{key, description, choices, value} */
+nlohmann::json tunable_state(const Config &cfg, nlohmann::json t)
+{
+    t["value"] = cfg.get_json(t["key"].get<std::string>());
+    return t;
+}
+
+/* /config [key [value]]：看全部可调键 / 看一个键 / 改一个键。值按 choices 的写法认：
+ * 字符串比原文，数字比 dump 出来的样子，所以 "80" 认作 80。只写 settings.json 里那一个键，
+ * 内存同步改，下一次读就生效（ADR-0010 的点对点 persist）。 */
+CommandOutcome cmd_config(Env &e, const std::string &arg)
+{
+    const Config &cfg = *e.ctx.config;
+    const std::string key = arg.substr(0, arg.find(' '));
+    const std::string text = key.size() < arg.size() ? arg.substr(key.size() + 1) : "";
+
+    nlohmann::json items = nlohmann::json::array();
+    for (const nlohmann::json &t : tunables())
+        if (key.empty() || t["key"] == key) items.push_back(tunable_state(cfg, t));
+    if (items.empty()) return {.reply = command_error("没有这个配置项：" + key)};
+    if (text.empty()) return {.reply = ok_json("config", nlohmann::json{{"items", items}})};
+
+    for (const nlohmann::json &c : items[0]["choices"])
+    {
+        if ((c.is_string() ? c.get<std::string>() : c.dump()) != text) continue;
+        if (!e.ctx.config->persist(key, c)) return {.reply = command_error("写入 settings.json 失败")};
+        items[0]["value"] = c;
+        return {.reply = ok_json("config", nlohmann::json{{"items", items}})};
+    }
+    return {.reply = command_error(key + " 不能取 " + text + "，可取：" + items[0]["choices"].dump())};
+}
+
 /* /plugins：装了哪些、各带了什么、建 agent 时出了什么问题。只读。 */
 CommandOutcome cmd_plugins(Env &e, const std::string &)
 {
@@ -144,6 +176,7 @@ constexpr CommandDef kCommands[] = {
     {"effort", "主模型的思考量级（/effort <none|minimal|low|medium|high|xhigh|max|default>，端点认哪些看端点）", cmd_effort},
     {"plugins", "查看装了哪些 plugin、各带了什么（只读；装 = git clone 进目录，卸 = 删掉）",
      cmd_plugins},
+    {"config", "查看与修改设置（/config <键> <值> 直接改，写进 settings.json 即刻生效）", cmd_config},
     {"compact", "把这段对话的历史压成一条摘要（/compact <指令> 告诉它重点留什么）", cmd_compact},
 };
 

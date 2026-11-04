@@ -43,13 +43,48 @@ type extOutput struct {
 	lines []string
 }
 
+func statuslinePath() (string, error) {
+	home, err := os.UserHomeDir()
+	return filepath.Join(home, ".realagent", "statusline.json"), err
+}
+
+// saveStatuslineCommand 把命令写进 statusline.json（/config statusline）。空 = 删掉文件，回到内置。
+// 文件里别的键（从 Claude Code 拷来的 padding 之类）原样留着
+func saveStatuslineCommand(command string) error {
+	path, err := statuslinePath()
+	if err != nil {
+		return err
+	}
+	if command == "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	c := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &c) // 坏文件就整份重写：它本来也用不了
+	}
+	c["type"], c["command"] = "command", command
+	b, _ := json.MarshalIndent(c, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0o644)
+}
+
+// use 换成另一条命令：清掉上一条的输出，下一次 watchStatusline 必跑
+func (e *external) use(command string) {
+	e.command, e.input, e.lines = command, nil, nil
+}
+
 // loadStatuslineCommand 读 ~/.realagent/statusline.json；没有这个文件 = 用内置的
 func loadStatuslineCommand() (string, error) {
-	home, err := os.UserHomeDir()
+	path, err := statuslinePath()
 	if err != nil {
 		return "", nil
 	}
-	b, err := os.ReadFile(filepath.Join(home, ".realagent", "statusline.json"))
+	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}

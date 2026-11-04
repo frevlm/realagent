@@ -52,6 +52,12 @@ class Config {
     mutable std::shared_ptr<std::mutex> mutex_ = std::make_shared<std::mutex>();
 };
 
+/* /config 能改的键：[{key, description, choices}]。值只能取 choices 里的一个。 */
+nlohmann::json tunables();
+
+/* key 是 /config 能改的键，且 v 是它可取的值之一。load 也拿它校验 compact_threshold。 */
+bool tunable_accepts(std::string_view key, const nlohmann::json &v);
+
 std::string getenv_or(std::string_view name, std::string_view fallback = "");
 
 } // namespace realagent

@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -27,6 +28,14 @@ nlohmann::json defaults()
             {"mcp_http_bridge",
              {"npx", "-y", "mcp-remote", "{url}",
               nlohmann::json::array({"--header", "{name}: {value}"})}}};
+}
+
+// 50、55、…、100
+nlohmann::json threshold_steps()
+{
+    nlohmann::json a = nlohmann::json::array();
+    for (int v = 50; v <= 100; v += 5) a.push_back(v);
+    return a;
 }
 
 fs::path settings_path(const fs::path &dir) { return dir / ".realagent" / "settings.json"; }
@@ -96,6 +105,24 @@ std::string getenv_or(std::string_view name, std::string_view fallback)
     return std::string(fallback);
 }
 
+nlohmann::json tunables()
+{
+    return nlohmann::json::array(
+        {{{"key", "compact_threshold"},
+          {"description", "上下文用到窗口的百分之几就自动压缩；100 = 不提前压，只在溢出时压"},
+          {"choices", threshold_steps()}},
+         {{"key", "permission"},
+          {"description", "工具调用要不要问你：ask 问 / allow-all 全放行 / deny 全拒"},
+          {"choices", nlohmann::json::array({"ask", "allow-all", "deny"})}}});
+}
+
+bool tunable_accepts(std::string_view key, const nlohmann::json &v)
+{
+    for (const nlohmann::json &t : tunables())
+        if (t["key"] == key) return std::find(t["choices"].begin(), t["choices"].end(), v) != t["choices"].end();
+    return false;
+}
+
 std::expected<Config, std::string> Config::load()
 {
     Config cfg;
@@ -107,8 +134,7 @@ std::expected<Config, std::string> Config::load()
     if (*file) merge_into(cfg.settings_, **file);
 
     // 读不懂就别猜（ADR-0010）：不在档上的阈值不替用户取整
-    if (const nlohmann::json &t = cfg.settings_["compact_threshold"];
-        !t.is_number_integer() || t.get<int>() < 50 || t.get<int>() > 100 || t.get<int>() % 5 != 0)
+    if (const nlohmann::json &t = cfg.settings_["compact_threshold"]; !tunable_accepts("compact_threshold", t))
         return std::unexpected("compact_threshold 要是 50 到 100 之间 5 的倍数，现在是 " + t.dump());
 
     return cfg;

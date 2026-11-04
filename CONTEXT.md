@@ -477,7 +477,7 @@ _Avoid_: `cost 帧`（单值帧型是死路，加第二个值就得破坏客户�
 
 输入框**下方**的常驻栏，照抄本机 ccline 的 cometix 预设（Haleclipse/CCometixLine v2.0.1）：两行，`model | dir | git | 对话标题 | 上下文进度条`，`配额 5h | 配额 7d | 缓存命中 | 首 token 时延 | 出字速度 | 版本`；宽度不够在段间折行，单段超宽按优先级降档。没数据的值一律填 `--`，段照画——配额、缓存倒计时、版本 realagent 没有数据源，恒为 `--`；effort 没配也是 `--`。目录启动拿一次，git 启动与每次收工各拉一次；上下文、缓存、时延来自 [[status_update]]；模型与 effort 会被 `/model`、`/effort` 改，改了由 core 推 [[statusline]] 帧覆盖写——客户端不轮询，也不关心是谁改的。推帧的触发是**主循环比对载荷**：事件循环每轮算一次 statusline 载荷，与上次推送的不同才推。因此改配置的代码路径不需要记得通知谁，与状态栏无关的配置变更也不会白推一帧。展示偏好（显示哪几段、字形用 nerd / unicode / ascii 哪一档）纯客户端状态，core 不认。
 
-**整条栏可以换成用户自己的命令**，接口照抄 Claude Code 的 statusLine：`~/.realagent/statusline.json` 写 `{"type": "command", "command": "..."}`（就是 Claude Code settings.json 里那个对象，原样拷过来），TUI 在状态变化时用 `sh -c` 跑它（跑的期间又变了，旧的那次输出作废），stdin 是 Claude Code 字段名的 JSON（`model`、`workspace`、`context_window`、`prompt_cache`……，realagent 多出来的放在 `realagent` 下），stdout 每行就是栏的一行，终端宽度在 `COLUMNS`。字段名不自创，是为了给 Claude Code 写的状态栏（ccline 在内）不改就能用。这份文件归 TUI 不归 core——core 不画栏，读它没有消费方。没这个文件就是上面的内置样式。
+**整条栏可以换成用户自己的命令**，接口照抄 Claude Code 的 statusLine：`~/.realagent/statusline.json` 写 `{"type": "command", "command": "..."}`（就是 Claude Code settings.json 里那个对象，原样拷过来），TUI 在状态变化时用 `sh -c` 跑它（跑的期间又变了，旧的那次输出作废），stdin 是 Claude Code 字段名的 JSON（`model`、`workspace`、`context_window`、`prompt_cache`……，realagent 多出来的放在 `realagent` 下），stdout 每行就是栏的一行，终端宽度在 `COLUMNS`。字段名不自创，是为了给 Claude Code 写的状态栏（ccline 在内）不改就能用。这份文件归 TUI 不归 core——core 不画栏，读它没有消费方。没这个文件就是上面的内置样式。TUI 的 `/config statusline <命令>` 写的就是这份文件（清空 = 删掉它），即刻换上，不用重启。
 
 _Avoid_: `状态行`（那是活动区里的另一条，见下）
 

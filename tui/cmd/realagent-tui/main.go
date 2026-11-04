@@ -220,12 +220,10 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		case v.reply.Error != "":
 			m.emit(kindError, v.reply.Error)
 		default:
-			// 无参的 /model 是要选一个：做成子面板，造不出才退回文本
-			if m.panelWant == v.reply.Command {
-				if p := modelPanel(v.reply.Data); p != nil {
-					m.panel = p
-					return m, nil
-				}
+			// 无参的 /model、/config 是要选一个：做成子面板，造不出才退回文本
+			if p := m.replyPanel(v.reply); p != nil {
+				m.panel = p
+				return m, nil
 			}
 			text := describeCommand(v.reply.Command)
 			switch v.reply.Command {
@@ -233,6 +231,8 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				text = renderModels(v.reply.Data)
 			case "plugins":
 				text = renderPlugins(v.reply.Data)
+			case "config":
+				text = renderConfig(v.reply.Data)
 			case "effort":
 				var e struct{ Effort string }
 				if json.Unmarshal(v.reply.Data, &e) == nil {
@@ -442,6 +442,19 @@ func (m model) panelKey(key string) (model, tea.Cmd) {
 	return m, nil
 }
 
+// replyPanel 按这条命令期待的面板（panelWant）把回包做成子面板；不期待或造不出返回 nil
+func (m model) replyPanel(r client.Reply) *panel {
+	switch {
+	case m.panelWant == "model" && r.Command == "model":
+		return modelPanel(r.Data)
+	case m.panelWant == "config" && r.Command == "config":
+		return configPanel(r.Data, m.sl.ext.command)
+	case m.panelWant == "config-key" && r.Command == "config":
+		return choicePanel(r.Data)
+	}
+	return nil
+}
+
 // submitInput 发送当前输入（普通消息或斜杠命令），清空输入框。
 // fromPanel = 这条输入是子面板确认出来的（决定结果回来后面板要不要接着开，见 panelWantOf）。
 func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
@@ -471,6 +484,15 @@ func (m model) submitInput(fromPanel bool) (model, tea.Cmd) {
 		if m.panelWant == "statusline" {
 			m.panel = m.sl.panel() // 面板里改的，改完还留在面板里接着改
 		}
+		return m, nil
+	case cmd == "/config" && (rest == "statusline" || strings.HasPrefix(rest, "statusline ")):
+		command := strings.TrimSpace(strings.TrimPrefix(rest, "statusline"))
+		if err := saveStatuslineCommand(command); err != nil {
+			m.emit(kindError, "statusline.json: "+err.Error())
+			return m, nil
+		}
+		m.sl.ext.use(command)
+		m.emit(kindInfo, "⚙ statusline = "+statuslineLabel(command))
 		return m, nil
 	case cmd == "/new":
 		m.client.Fresh()

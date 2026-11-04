@@ -718,6 +718,21 @@ static void test_endpoint_models()
     const json sw = json::parse(run_command(ctx, "", nullptr, "/model hand-typed").reply);
     CHECK(sw["ok"] == true && cfg.model(ModelTier::Main) == "hand-typed", "/model <名字> 不查清单，手填即生效");
 
+    // /config：列可调键、按 choices 的写法认值、只认 choices 里的
+    const json all = json::parse(run_command(ctx, "", nullptr, "/config").reply);
+    CHECK(all["ok"] == true && all["data"]["items"].size() == 2 && all["data"]["items"][0]["key"] == "compact_threshold" &&
+              all["data"]["items"][0]["value"] == 85,
+          "/config 列出全部可调键与当前值");
+    const json set = json::parse(run_command(ctx, "", nullptr, "/config compact_threshold 70").reply);
+    CHECK(set["ok"] == true && cfg.get_json("compact_threshold") == 70, "/config <键> <值>：\"70\" 认作整数 70，即刻生效");
+    CHECK(json::parse(run_command(ctx, "", nullptr, "/config permission deny").reply)["ok"] == true &&
+              cfg.get("permission") == "deny",
+          "字符串值按原文认");
+    const json off = json::parse(run_command(ctx, "", nullptr, "/config compact_threshold 72").reply);
+    CHECK(off["ok"] == false && cfg.get_json("compact_threshold") == 70, "不在 choices 里的值拒收，配置不动");
+    CHECK(json::parse(run_command(ctx, "", nullptr, "/config api_key x").reply)["ok"] == false,
+          "不在可调表里的键拒收");
+
     cfg.persist("api_key", "nope");
     const std::string fail = json::parse(run_command(ctx, "", nullptr, "/model").reply).value("error", "");
     CHECK(fail.find("HTTP 401：bad key") != std::string::npos && fail.find("/model <模型名>") != std::string::npos,
