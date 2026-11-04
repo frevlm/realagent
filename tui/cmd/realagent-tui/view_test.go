@@ -31,7 +31,7 @@ func TestFrameFillsScreen(t *testing.T) {
 		"四十行粘贴": func(m *model) { m.ed.insert(strings.Repeat("粘贴进来的一行\n", 40)) },
 		"读秒+状态栏+多行输入": func(m *model) {
 			m.busy.active, m.busy.verb = true, "思考中"
-			m.sl = statusline{dir: "proj", showDir: true, iconSet: "emoji"}
+			m.sl = testStatusline() // 两行、能折行降级的那种
 			m.ed.insert("一\n二\n三")
 		},
 	}
@@ -62,8 +62,9 @@ func TestCursorAtCaret(t *testing.T) {
 	m.ed.left()
 	m.ed.left()
 	c := m.View().Cursor
-	if c == nil || c.X != len(prompt)+4 || c.Y != m.height-1 || screen(m)[c.Y] != "> 你好世界" {
-		t.Fatalf("光标 = %+v，want (%d, %d) 在 \"> 你好世界\" 那行", c, len(prompt)+4, m.height-1)
+	y := m.height - 1 - len(m.sl.render(m.width)) // 输入框在状态栏上面
+	if c == nil || c.X != len(prompt)+4 || c.Y != y || screen(m)[c.Y] != "> 你好世界" {
+		t.Fatalf("光标 = %+v，want (%d, %d) 在 \"> 你好世界\" 那行", c, len(prompt)+4, y)
 	}
 	m.approval = &pendingApproval{id: "a", tool: "bash"}
 	if c := m.View().Cursor; c != nil {
@@ -81,7 +82,7 @@ func TestEditorYields(t *testing.T) {
 
 	m = sized(40, 3, 0)
 	m.busy.active, m.busy.verb = true, "思考中"
-	m.sl = statusline{dir: "proj", showDir: true, iconSet: "emoji"}
+	m.sl = statusline{cwd: "proj", tier: "unicode"}
 	m.ed.insert("一\n二\n三")
 	m.ed.home()
 	if c := m.View().Cursor; c == nil || c.Y != 1 || screen(m)[1] != "> 一" {
@@ -100,8 +101,9 @@ func TestOverlayKeepsHistory(t *testing.T) {
 	if !reflect.DeepEqual(before[:keep], after[:keep]) {
 		t.Errorf("菜单之上的历史动了：\nbefore %q\nafter  %q", before[:keep], after[:keep])
 	}
-	if got := after[keep:]; !reflect.DeepEqual(got, append(append([]string{""}, menu...), "> /")) {
-		t.Errorf("历史之下应是空行、菜单、输入框，got %q", got)
+	want := append(append(append([]string{""}, menu...), "> /"), plain(m.sl.render(m.width))...)
+	if got := after[keep:]; !reflect.DeepEqual(got, want) {
+		t.Errorf("历史之下应是空行、菜单、输入框、状态栏，got %q", got)
 	}
 }
 

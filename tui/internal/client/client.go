@@ -112,6 +112,17 @@ type Frame struct {
 	Error string  `json:"error"` // turn_end：core 报的失败
 	Cost  float64 `json:"cost"`  // status_update / agent_end：本次跑的累计花费，算不出钱时不带
 	Model string  `json:"model"` // statusline
+
+	Context int64 `json:"context"` // statusline：模型的上下文窗口，模型表里查不到时为 0
+	Live          // status_update 里喂状态栏的那几个键
+}
+
+// Live 是 status_update 帧里喂状态栏的键。指针：nil = 这一帧没带
+type Live struct {
+	ContextTokens *int64   `json:"context_tokens"` // 主模型上一次请求的提示词 token 数
+	CacheHit      *float64 `json:"cache_hit"`      // 其中从缓存读的比例
+	TTFTMs        *int64   `json:"ttft_ms"`        // 首 token 时延
+	TPS           *float64 `json:"tps"`            // 出字速度
 }
 
 // UnmarshalJSON 解线上的一帧：推送流用 event 作键，回放用 type，载荷都在 data 里。

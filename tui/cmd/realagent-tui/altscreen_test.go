@@ -85,7 +85,7 @@ func TestAltscreenPaintsWholeTurn(t *testing.T) {
 	}
 }
 
-// 最后一帧里每行只出现一次——重复即说明历史被画了两遍
+// 历史区里每行只出现一次——重复即说明历史被画了两遍（底下状态栏再显示一次对话标题，不算）
 func TestAltscreenNoDuplicateLines(t *testing.T) {
 	m := testModel()
 	m.width, m.height = 40, 24
@@ -93,7 +93,9 @@ func TestAltscreenNoDuplicateLines(t *testing.T) {
 	m.handleEvent(client.Frame{Event: "message_update", Delta: "答一句"})
 	m.tr.close()
 
-	screen := ansi.Strip(m.View().Content)
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	dock, _, _ := m.dock()
+	screen := strings.Join(lines[:len(lines)-len(dock)], "\n")
 	for _, want := range []string{"问一句", "答一句"} {
 		if n := strings.Count(screen, want); n != 1 {
 			t.Errorf("%q 应只出现 1 次，got %d\n屏幕:\n%s", want, n, screen)

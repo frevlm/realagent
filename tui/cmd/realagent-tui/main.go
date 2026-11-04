@@ -92,8 +92,12 @@ type model struct {
 }
 
 func initialModel(c *client.Client) model {
-	m := model{client: c, sl: newStatusline()}
+	sl, err := newStatusline()
+	m := model{client: c, sl: sl}
 	m.emit(kindInfo, "Enter 发送，Alt+Enter 换行，Esc 中断，Ctrl+O 展开工具输出，Ctrl+C 退出")
+	if err != nil {
+		m.emit(kindError, err.Error())
+	}
 	return m
 }
 
@@ -143,13 +147,14 @@ func fetchSessionsCmd(c *client.Client) tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	// 起步是一段新对话：还没说过话，没有历史可读
-	return tea.Batch(fetchCommandsCmd(m.client), fetchStatusCmd(m.client))
+	return tea.Batch(fetchCommandsCmd(m.client), fetchStatusCmd(m.client), fetchGitCmd())
 }
 
 // Update 只跑业务，别处只管往对话里追加；屏幕在 View 里按需取。
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
-	return next, cmd
+	watch := next.watchStatusline()
+	return next, tea.Batch(cmd, watch)
 }
 
 func (m model) update(msg tea.Msg) (model, tea.Cmd) {
@@ -168,6 +173,16 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 
 	case commandsMsg:
 		m.commands = v
+		return m, nil
+
+	case gitMsg:
+		m.sl.git = v.info
+		return m, nil
+
+	case extOutput:
+		if v.gen == m.sl.ext.gen {
+			m.sl.ext.lines = v.lines
+		}
 		return m, nil
 
 	case failMsg:
@@ -482,6 +497,7 @@ func (m model) switchTo(sessionID string) (model, tea.Cmd) {
 func (m *model) reset() {
 	m.tr = transcript{}
 	m.scroll = scroll{}
+	m.sl.forget()
 	m.busy.stop()
 	m.awaiting = false
 }
@@ -526,6 +542,7 @@ func (m *model) handleEvent(f client.Frame) tea.Cmd {
 		// 收件箱三种来源都是 user；用户自己打的那条也从这里画
 		if f.Text != "" {
 			m.emit(kindUser, f.Text)
+			m.sl.noteUserMessage(f.Text)
 		}
 
 	case "message_update":
@@ -546,13 +563,14 @@ func (m *model) handleEvent(f client.Frame) tea.Cmd {
 
 	case "statusline":
 		// 与 GET /statusline 同一份载荷，覆盖写
-		m.sl.model = f.Model
+		m.sl.model, m.sl.window = f.Model, f.Context
 
 	case "status_update":
 		// 本次 run 累计的绝对值，覆盖写。算不出钱时帧里不带 cost，解出来的 0 就是"没数据"，不覆盖
 		if f.Cost != 0 {
 			m.busy.cost = f.Cost
 		}
+		m.sl.live.merge(f.Live)
 
 	case "tool_execution_start":
 		m.awaiting = false
@@ -602,6 +620,7 @@ func (m *model) handleEvent(f client.Frame) tea.Cmd {
 		m.tr.close()
 		m.awaiting = false
 		m.busy.stop()
+		return fetchGitCmd() // 这一趟可能改了文件、提交了：刷新 git 段
 	}
 	return nil
 }

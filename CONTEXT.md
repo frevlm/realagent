@@ -455,17 +455,19 @@ _Avoid_: `模型配置`（它不在 settings.json 里，是另一份数据）
 
 一次 run 花掉的钱（USD）。按本次调用的模型查[[模型数据表]]算出——**单价与 token 用量都不出 core**，客户端只收最终数字。core 按 agent 实例跨 turn 累加，随 [[status_update]] 帧下发；一次用户输入起算清零，帧内为累计绝对值。
 
-_Avoid_: `usage`、`token 统计`（客户端侧无 token 概念，只有钱）
+_Avoid_: `usage`、`token 统计`（客户端侧没有计费口径的 token，只有钱；状态栏的 `context_tokens` 是提示词大小，不是用量）
 
 ### **status_update（运行态帧）**:
 
-core 向客户端报运行态数据的推送帧，**开放键集**：core 除 `cost`（需累加）外一律不解释、原样转发。落点是 [[Status（状态行）]]——本次 run 的实时数字，run 结束即消失。
+core 向客户端报运行态数据的推送帧，**开放键集**：core 除 `cost`（需累加）外一律不解释、原样转发。`cost` 落在 [[Status（状态行）]]——本次 run 的实时数字，run 结束即消失；`context_tokens` / `cache_hit` / `ttft_ms` / `tps` 落在 [[Statusline（状态栏）]]，跨 run 保留到换对话。
 
 _Avoid_: `cost 帧`（单值帧型是死路，加第二个值就得破坏客户端）
 
 ### **Statusline（状态栏）**:
 
-输入框**下方**的常驻栏：`🤖 model | 📁 dir | 🌿 git`。内容是**这次会话的身份信息**——哪个模型、哪个目录、哪个分支。目录与分支会话期内不变，启动拿一次；模型会被 `/model` 切档改，改了由 core 推 [[statusline]] 帧覆盖写——客户端不轮询，也不关心是谁改的。推帧的触发是**主循环比对载荷**：事件循环每轮算一次 statusline 载荷，与上次推送的不同才推。因此改配置的代码路径不需要记得通知谁，与状态栏无关的配置变更也不会白推一帧。展示偏好（显示哪几段、emoji 还是 nerd font）纯客户端状态，core 不认。
+输入框**下方**的常驻栏，照抄本机 ccline 的 cometix 预设（Haleclipse/CCometixLine v2.0.1）：两行，`model | dir | git | 对话标题 | 上下文进度条`，`配额 5h | 配额 7d | 缓存命中 | 首 token 时延 | 出字速度 | 版本`；宽度不够在段间折行，单段超宽按优先级降档。没数据的值一律填 `--`，段照画——effort、配额、缓存倒计时、版本 realagent 没有数据源，恒为 `--`。目录启动拿一次，git 启动与每次收工各拉一次；上下文、缓存、时延来自 [[status_update]]；模型会被 `/model` 切档改，改了由 core 推 [[statusline]] 帧覆盖写——客户端不轮询，也不关心是谁改的。推帧的触发是**主循环比对载荷**：事件循环每轮算一次 statusline 载荷，与上次推送的不同才推。因此改配置的代码路径不需要记得通知谁，与状态栏无关的配置变更也不会白推一帧。展示偏好（显示哪几段、字形用 nerd / unicode / ascii 哪一档）纯客户端状态，core 不认。
+
+**整条栏可以换成用户自己的命令**，接口照抄 Claude Code 的 statusLine：`~/.realagent/statusline.json` 写 `{"type": "command", "command": "..."}`（就是 Claude Code settings.json 里那个对象，原样拷过来），TUI 在状态变化时用 `sh -c` 跑它（跑的期间又变了，旧的那次输出作废），stdin 是 Claude Code 字段名的 JSON（`model`、`workspace`、`context_window`、`prompt_cache`……，realagent 多出来的放在 `realagent` 下），stdout 每行就是栏的一行，终端宽度在 `COLUMNS`。字段名不自创，是为了给 Claude Code 写的状态栏（ccline 在内）不改就能用。这份文件归 TUI 不归 core——core 不画栏，读它没有消费方。没这个文件就是上面的内置样式。
 
 _Avoid_: `状态行`（那是活动区里的另一条，见下）
 
@@ -589,7 +591,7 @@ _Avoid_: `定型`、`提交`、`freeze`、`finalize`（都不再指任何东西�
 - 审批链路：core 永远是发起方。裁决为 ask 时 core 向用户交互界面（TUI/gui）发询问，界面回传裁决。gui 与 TUI 是平等的 HTTP 客户端，接口按多客户端设计。
 - 模型元数据（[[Model]]）：name / owned_by / context 三个字段，**不含单价**。
   - 实况注（2026-08-25）：数据在 `Pricing`（`core/src/llm/llm.cpp`）里，启动时读一次。绕了一圈回到"core 持有"——但持有的是**数据表本身**，不是别人数据的副本，那才是当初 ADR-0012 反对的东西。三个字段与"不含单价"两条自始至终没变。
-- 计价：core 按本次模型查[[模型数据表]]算出 [[Cost]]，按 agent 实例跨 turn 累加，经 [[status_update]] 帧下发（本次 run 累计绝对值，客户端覆盖写）。token 不跨**客户端**边界。
+- 计价：core 按本次模型查[[模型数据表]]算出 [[Cost]]，按 agent 实例跨 turn 累加，经 [[status_update]] 帧下发（本次 run 累计绝对值，客户端覆盖写）。计费口径的 token 不跨**客户端**边界（提示词大小 `context_tokens` 过边界，只喂状态栏）。
 - 模型数据表：不走 settings.json；`~/.realagent/models.json` 存在即整表接管编译进二进制的出厂表，不合并。
 - 不兜底原则：模型表解析失败即报错原文（不跳过坏条目、不补默认值），配置的模型名不在表里不检查不警告。少写代码优先于替用户擦屁股。
   - 实况注（2026-08-25）："解析失败即硬错"有一处松动——报错但**不拒绝启动**。从前表是插件的，读不动就是那个插件加载失败；现在表是 core 的，为一份可选的价目表拒绝对话，是把次要功能提成了必需品。表读不动 = 本次运行不计价，仅此而已。

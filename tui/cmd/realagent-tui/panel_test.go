@@ -233,11 +233,11 @@ func TestStatuslinePanel(t *testing.T) {
 	if m.panel == nil {
 		t.Fatal("/statusline 未开面板")
 	}
-	sel := len(m.panel.items) - 1 // icons nerd
+	sel := len(m.panel.items) - 1 // icons ascii
 	m.panel.sel = sel
 	m, _ = m.panelKey("enter")
-	if m.sl.iconSet != "nerd" {
-		t.Errorf("iconSet = %q, want nerd", m.sl.iconSet)
+	if m.sl.tier != "ascii" {
+		t.Errorf("tier = %q, want ascii", m.sl.tier)
 	}
 	if m.panel == nil {
 		t.Fatal("面板里改完应留在面板")

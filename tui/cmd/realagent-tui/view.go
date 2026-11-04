@@ -45,13 +45,13 @@ func editorRows(h int) int { return max(3, h/3) }
 // dock 是屏幕底下那块：读秒行 + 输入框 + 状态栏，连同光标在块内的位置。
 // 屏幕再矮，输入框也只让到读秒行与状态栏之外剩下的行数，至少一行：光标所在行总在屏上
 func (m model) dock() (rows []string, cx, cy int) {
-	var above, below []string
+	var above []string
 	if s := m.busy.render(m.width); s != "" {
 		above = append(above, s)
 	}
-	if s := m.sl.render(); s != "" {
-		below = append(below, s)
-	}
+	// 状态栏让着输入框：屏幕矮到放不下时从下往上少画几行，输入框至少留一行
+	below := m.sl.render(m.width)
+	below = below[:min(len(below), max(0, m.height-len(above)-1))]
 	ed, cx, cy := m.ed.view(m.width, max(1, min(editorRows(m.height), m.height-len(above)-len(below))))
 	return append(append(above, ed...), below...), cx, cy + len(above)
 }
