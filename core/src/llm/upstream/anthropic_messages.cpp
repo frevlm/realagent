@@ -92,7 +92,8 @@ HttpRequest build_request(protocol::AnthropicMessages, const Config &cfg, const 
 
     nlohmann::json body;
     body["model"] = d.value("model", std::string());
-    body["max_tokens"] = 4096;
+    // 思考 token 也算在 max_tokens 里；本协议这个字段必填，流式不怕超时，给足
+    body["max_tokens"] = 64000;
     body["stream"] = true;
     if (const std::string system = d.value("system", std::string()); !system.empty())
         body["system"] = system;

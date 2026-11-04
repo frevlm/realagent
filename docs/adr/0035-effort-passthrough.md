@@ -29,3 +29,5 @@
 
 - 不认识 effort 的模型（如 Kimi K2.x 拒收 `reasoning_effort`）会让请求失败，经 revlm 时看到的是它换遍渠道后的 502，而不是上游原文。用户用 `/effort default` 退回。
 - Qwen 的整数 `thinking_budget`、Kimi K2.x 的 `thinking: {type}` 不在这三种形状里，这次不支持。
+- 思考 token 计入 `max_tokens`，原先写死的 4096 不够。anthropic-messages 这个字段必填，改为 64000；openai-chat 里它可选，删掉，由端点用模型自己的上限。
+- openai-chat 上行把 thinking 块回传为 assistant 消息的 `reasoning_content`：DeepSeek 文档要求带 tools 时每轮都回传，缺了 400。在 openai-chat 上，DeepSeek 不带 `reasoning_effort` 就不思考，配了 effort 才走到这条路。

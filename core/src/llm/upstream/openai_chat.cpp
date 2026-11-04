@@ -37,7 +37,6 @@ HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohman
 
     nlohmann::json body;
     body["model"] = d.value("model", std::string());
-    body["max_tokens"] = 4096;
     body["stream"] = true;
     // 不问就不给：本协议默认的流不带 usage，计价拿不到数
     body["stream_options"] = nlohmann::json{{"include_usage", true}};
@@ -58,10 +57,16 @@ HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohman
             // tool_result 各自单独成一条 role=tool 的 message，先把它们摘出去
             nlohmann::json tool_msgs = nlohmann::json::array();
             nlohmann::json tool_calls = nlohmann::json::array();
+            std::string reasoning;
             for (const nlohmann::json &b : blocks)
             {
                 const std::string bt = b.at("type");
-                if (bt == "tool_result")
+                if (bt == "thinking")
+                {
+                    // DeepSeek：带 tools 时每一轮的 reasoning_content 都得回传，缺了 400
+                    reasoning += b.value("thinking", std::string());
+                }
+                else if (bt == "tool_result")
                 {
                     tool_msgs.push_back(nlohmann::json{{"role", "tool"},
                                                        {"tool_call_id", b.at("tool_use_id")},
@@ -79,11 +84,12 @@ HttpRequest build_request(protocol::OpenAiChat, const Config &cfg, const nlohman
             }
 
             const std::string text = join_text(blocks);
-            if (!text.empty() || !tool_calls.empty())
+            if (!text.empty() || !tool_calls.empty() || !reasoning.empty())
             {
                 nlohmann::json mout;
                 mout["role"] = role == "user" ? "user" : "assistant";
                 mout["content"] = text;
+                if (!reasoning.empty()) mout["reasoning_content"] = reasoning;
                 if (!tool_calls.empty()) mout["tool_calls"] = tool_calls;
                 msgs.push_back(mout);
             }

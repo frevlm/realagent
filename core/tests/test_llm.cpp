@@ -203,6 +203,7 @@ static void test_build_request()
     if (body.is_discarded()) return;
     CHECK(body["stream"] == true, "stream=true");
     CHECK(body["model"] == "deepseek-v4-flash", "model 从对话透传");
+    CHECK(body["max_tokens"] == 64000, "max_tokens 给足：思考 token 也算在里面");
     const json asst = body["messages"][1];
     CHECK(asst["content"][0]["type"] == "thinking",
           "assistant[0].type=thinking");
@@ -225,7 +226,7 @@ static void test_build_request_openai_chat()
         "system": "You are a coding agent.",
         "messages": [
             {"role":"user","content":[{"type":"text","text":"hello"}]},
-            {"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"read","input":{"file_path":"a.txt"}}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"先读文件"},{"type":"tool_use","id":"c1","name":"read","input":{"file_path":"a.txt"}}]},
             {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"file body"}]}]}
         ],
         "tools": [{"name":"read","description":"读文件","input_schema":{"type":"object"}}]
@@ -249,6 +250,8 @@ static void test_build_request_openai_chat()
           "tool_use → tool_calls[].function");
     CHECK(asst["tool_calls"][0]["function"]["arguments"].is_string(),
           "arguments 是 JSON 字符串，不是对象（本协议如此）");
+    CHECK(asst["reasoning_content"] == "先读文件",
+          "thinking 块 → reasoning_content 回传（DeepSeek 带 tools 时缺了就 400）");
     const json toolmsg = body["messages"][3];
     CHECK(toolmsg["role"] == "tool",
           "tool_result → 单独一条 role=tool 的 message");
